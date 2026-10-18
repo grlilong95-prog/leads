@@ -40,7 +40,7 @@
 </head>
 <body class="text-slate-800 antialiased">
     <div id="app" v-cloak class="min-h-screen flex flex-col">
-        <!-- 0. 登录界面 (优化1：默认清空，不再自动显示账号密码) -->
+        <!-- 登录界面 -->
         <div v-if="!isLoggedIn" class="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-indigo-950 flex items-center justify-center p-4 w-full fixed inset-0 z-50">
             <div class="bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl max-w-md w-full p-8 border border-white/20 relative overflow-hidden tech-topbar">
                 <div class="text-center mb-8">
@@ -114,6 +114,10 @@
                     <div class="bg-white rounded-xl shadow-sm border p-5 tech-card">
                         <div class="flex justify-between items-center mb-4 pb-2 border-b font-bold text-slate-800">
                             <span><i class="fa-solid fa-magnifying-glass text-blue-600 mr-2"></i>线索筛选 (全部: <b class="text-blue-600">{{ leads?.length || 0 }}</b> 条 / 结果: <b class="text-amber-600">{{ filteredLeads?.length || 0 }}</b> 条)</span>
+                            <!-- 定时排队监控小组件 -->
+                            <span v-if="queueCount > 0" class="text-xs font-normal bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-full border border-indigo-100 animate-pulse">
+                                ⏳ 仿真实时入库排队中: <b>{{ queueCount }}</b> 条 (隔{{ dripConfig.intervalSeconds }}秒自动释放{{ dripConfig.countPerBatch }}条)
+                            </span>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <input v-model.trim="filters.region" placeholder="按地区搜索" class="bg-slate-50 border rounded-lg px-3 py-2 text-sm outline-none">
@@ -207,43 +211,97 @@
                         <button @click="adminSubTab = 'history'" :class="adminSubTab === 'history' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm">全员提取流水</button>
                     </div>
 
-                    <div v-if="adminSubTab === 'import'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div class="bg-white rounded-xl border p-5 tech-card">
-                            <h3 class="font-bold mb-4 text-slate-800"><i class="fa-solid fa-pen-to-square text-blue-600 mr-2"></i>手动录入新线索 (自动查重)</h3>
-                            <form @submit.prevent="addManualLead" class="space-y-3">
-                                <div class="grid grid-cols-2 gap-3">
-                                    <input v-model.trim="manualForm.name" placeholder="姓名 (选填)" class="border p-2 rounded text-sm outline-none">
-                                    <select v-model="manualForm.gender" class="border p-2 rounded text-sm outline-none">
-                                        <option value="男">男</option><option value="女">女</option><option value="无">无</option>
-                                    </select>
+                    <div v-if="adminSubTab === 'import'" class="space-y-6">
+                        <!-- 匀速滴灌/仿真实时入库控制器 -->
+                        <div class="bg-gradient-to-r from-indigo-900 to-blue-900 text-white rounded-xl p-5 shadow-md">
+                            <div class="flex justify-between items-center flex-wrap gap-3 mb-3 border-b border-white/10 pb-3">
+                                <div class="flex items-center space-x-2">
+                                    <i class="fa-solid fa-clock-rotate-left text-yellow-400 text-xl"></i>
+                                    <span class="font-bold text-base">匀速定时滴灌引擎 (仿真全天实时入库)</span>
                                 </div>
-                                <div class="grid grid-cols-2 gap-3">
-                                    <input v-model.trim="manualForm.phone" required type="tel" placeholder="11位手机号 (必填)" class="border border-blue-400 p-2 rounded text-sm font-mono-tech outline-none">
-                                    <input v-model.trim="manualForm.region" placeholder="地区 (选填)" class="border p-2 rounded text-sm outline-none">
+                                <div class="text-xs bg-black/30 px-3 py-1 rounded-full border border-white/20">
+                                    队列剩余待发布: <b class="text-yellow-300 text-sm mx-1">{{ queueCount }}</b> 条
                                 </div>
-                                <div class="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-slate-500 mb-1">选择数据来源</label>
-                                        <select v-model="manualForm.source" @change="onSourceChange" class="w-full border p-2 rounded text-sm font-semibold outline-none">
-                                            <option v-for="item in sourceList" :key="item.name" :value="item.name">{{ item.name }} (¥{{ item.price }})</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-500 mb-1">提取单价(元)</label>
-                                        <input v-model.number="manualForm.price" required type="number" class="w-full border p-2 rounded text-sm font-bold text-red-500 font-mono-tech outline-none">
-                                    </div>
+                            </div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                                <div>
+                                    <label class="block opacity-80 mb-1">每次发布数量 (条)</label>
+                                    <input v-model.number="dripConfig.countPerBatch" type="number" min="1" class="w-full bg-white/10 border border-white/20 rounded p-2 text-white font-bold outline-none">
                                 </div>
-                                <button type="submit" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-bold">提交并全网实时广播</button>
-                            </form>
+                                <div>
+                                    <label class="block opacity-80 mb-1">发布间隔时间 (秒)</label>
+                                    <input v-model.number="dripConfig.intervalSeconds" type="number" min="2" class="w-full bg-white/10 border border-white/20 rounded p-2 text-white font-bold outline-none">
+                                </div>
+                                <div class="flex items-end space-x-2">
+                                    <button @click="saveDripConfig" class="bg-yellow-500 hover:bg-yellow-600 text-slate-900 font-bold px-4 py-2 rounded shadow transition flex-1">保存频率设置</button>
+                                    <button @click="toggleDripEnabled" :class="dripConfig.enabled ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'" class="text-white font-bold px-3 py-2 rounded shadow transition">
+                                        {{ dripConfig.enabled ? '暂停滴灌' : '开启滴灌' }}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div v-if="queueCount > 0" class="mt-4 pt-3 border-t border-white/10 flex justify-between items-center text-xs flex-wrap gap-2">
+                                <span class="text-slate-300">
+                                    💡 预计还需 <b>{{ Math.ceil((queueCount / (dripConfig.countPerBatch||1)) * (dripConfig.intervalSeconds||60) / 60) }}</b> 分钟全部发布完毕。
+                                </span>
+                                <div class="flex space-x-2">
+                                    <button @click="controlQueue('release_all')" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded font-bold">立即全部一键释放</button>
+                                    <button @click="controlQueue('clear')" class="bg-red-500/80 hover:bg-red-600 text-white px-3 py-1 rounded font-bold">清空排队队列</button>
+                                </div>
+                            </div>
                         </div>
 
-                        <div class="bg-white rounded-xl border p-5 tech-card">
-                            <h3 class="font-bold mb-2 text-slate-800"><i class="fa-solid fa-file-excel text-emerald-600 mr-2"></i>批量导入 WPS / Excel (.xlsx)</h3>
-                            <p class="text-xs text-slate-500 mb-4">💡 <b>提示：</b>无需严格表头，系统会自动识别“来源/抖音/百度/融360/大模型”等关键词并<b>自动归类标价</b>！</p>
-                            <div class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center relative hover:bg-slate-50 cursor-pointer">
-                                <input type="file" @change="handleFileUpload" accept=".xlsx, .xls" class="absolute inset-0 opacity-0 cursor-pointer">
-                                <i class="fa-solid fa-cloud-arrow-up text-4xl text-slate-400 mb-2"></i>
-                                <p class="text-sm text-slate-600 font-medium">点击上传或将 Excel 文件拖拽到此处</p>
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div class="bg-white rounded-xl border p-5 tech-card">
+                                <h3 class="font-bold mb-4 text-slate-800"><i class="fa-solid fa-pen-to-square text-blue-600 mr-2"></i>手动录入新线索 (自动查重)</h3>
+                                <form @submit.prevent="addManualLead" class="space-y-3">
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <input v-model.trim="manualForm.name" placeholder="姓名 (选填)" class="border p-2 rounded text-sm outline-none">
+                                        <select v-model="manualForm.gender" class="border p-2 rounded text-sm outline-none">
+                                            <option value="男">男</option><option value="女">女</option><option value="无">无</option>
+                                        </select>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <input v-model.trim="manualForm.phone" required type="tel" placeholder="11位手机号 (必填)" class="border border-blue-400 p-2 rounded text-sm font-mono-tech outline-none">
+                                        <input v-model.trim="manualForm.region" placeholder="地区 (选填)" class="border p-2 rounded text-sm outline-none">
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label class="block text-xs text-slate-500 mb-1">选择数据来源</label>
+                                            <select v-model="manualForm.source" @change="onSourceChange" class="w-full border p-2 rounded text-sm font-semibold outline-none">
+                                                <option v-for="item in sourceList" :key="item.name" :value="item.name">{{ item.name }} (¥{{ item.price }})</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs text-slate-500 mb-1">提取单价(元)</label>
+                                            <input v-model.number="manualForm.price" required type="number" class="w-full border p-2 rounded text-sm font-bold text-red-500 font-mono-tech outline-none">
+                                        </div>
+                                    </div>
+                                    <button type="submit" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-bold">提交并全网实时广播</button>
+                                </form>
+                            </div>
+
+                            <div class="bg-white rounded-xl border p-5 tech-card">
+                                <h3 class="font-bold mb-2 text-slate-800"><i class="fa-solid fa-file-excel text-emerald-600 mr-2"></i>批量导入 WPS / Excel (.xlsx)</h3>
+                                
+                                <!-- 导入模式选择器 -->
+                                <div class="mb-3 p-2 bg-slate-50 border rounded-lg flex items-center justify-around text-xs font-bold">
+                                    <label class="flex items-center space-x-1 cursor-pointer">
+                                        <input type="radio" v-model="importMode" value="drip" class="text-blue-600">
+                                        <span class="text-indigo-600">匀速滴灌 (放入待发布队列，全天陆续入库)</span>
+                                    </label>
+                                    <label class="flex items-center space-x-1 cursor-pointer">
+                                        <input type="radio" v-model="importMode" value="instant" class="text-blue-600">
+                                        <span class="text-slate-600">直接全量入库</span>
+                                    </label>
+                                </div>
+
+                                <div class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center relative hover:bg-slate-50 cursor-pointer">
+                                    <input type="file" @change="handleFileUpload" accept=".xlsx, .xls" class="absolute inset-0 opacity-0 cursor-pointer">
+                                    <i class="fa-solid fa-cloud-arrow-up text-4xl text-slate-400 mb-2"></i>
+                                    <p class="text-sm text-slate-600 font-medium">点击上传或将 Excel 文件拖拽到此处</p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -333,13 +391,18 @@
                     isLoggingIn: false,
                     isProcessing: false,
                     currentUser: null,
-                    // 优化1：清空默认充填，打开网页不再自动填入 admin
                     loginForm: { username: '', password: '' },
                     currentTab: 'pool',
                     adminSubTab: 'import',
                     selectedLeadIds: [],
                     filters: { region: '', phoneTail: '', source: '' },
                     currentPage: 1, pageSize: 10, jumpPage: '',
+                    
+                    // 匀速滴灌导入控制参数
+                    importMode: 'drip', // drip: 匀速滴灌, instant: 立即入库
+                    queueCount: 0,
+                    dripConfig: { enabled: true, countPerBatch: 5, intervalSeconds: 60 },
+
                     sourceList: [
                         { name: 'GR-抖音投放', price: 55 }, { name: 'GR-百度推广', price: 35 }, { name: 'GR-抖音信息流', price: 85 },
                         { name: 'GR-平安进审', price: 5 }, { name: 'GR-南银法巴进审', price: 5 }, { name: 'GR-工行进审', price: 5 },
@@ -419,6 +482,9 @@
                         this.users = data.users || [];
                         this.leads = data.leads || [];
                         this.purchaseLogs = data.purchaseLogs || [];
+                        this.queueCount = data.queueCount || 0;
+                        if (data.dripConfig) this.dripConfig = data.dripConfig;
+
                         if (this.currentUser) {
                             const me = this.users.find(u => u.username === this.currentUser.username);
                             if (me) {
@@ -429,6 +495,30 @@
                         }
                     });
                 },
+
+                // 保存匀速滴灌频率配置
+                saveDripConfig() {
+                    socket.emit('update-drip-config', this.dripConfig, () => {
+                        Swal.fire('保存成功', `已调整为：每隔 ${this.dripConfig.intervalSeconds} 秒自动投放 ${this.dripConfig.countPerBatch} 条线索！`, 'success');
+                    });
+                },
+
+                toggleDripEnabled() {
+                    this.dripConfig.enabled = !this.dripConfig.enabled;
+                    socket.emit('update-drip-config', { enabled: this.dripConfig.enabled }, () => {
+                        Swal.fire(this.dripConfig.enabled ? '已开启匀速投放' : '已暂停匀速投放', '', 'info');
+                    });
+                },
+
+                controlQueue(action) {
+                    const msg = action === 'clear' ? '确定清空所有排队待发布的线索吗？' : '确定将所有排队的线索立刻一次性释放到公共池吗？';
+                    Swal.fire({ title: '控制队列', text: msg, icon: 'warning', showCancelButton: true }).then((r) => {
+                        if (r.isConfirmed) {
+                            socket.emit('control-import-queue', action, () => Swal.fire('操作完成', '', 'success'));
+                        }
+                    });
+                },
+
                 handleLogin() {
                     this.isLoggingIn = true;
                     socket.emit('login', this.loginForm, (res) => {
@@ -488,21 +578,16 @@
                         else Swal.fire('查重拦截', res.message, 'warning');
                     });
                 },
-                
-                // 优化2与优化3：智能匹配来源归类 + 自动对应标价 + 时间智能格式化
+
                 matchSourceAndPrice(rawSource, rawPrice) {
                     if (!rawSource) return { source: 'GR-网贷混合申请', price: 3 };
                     const str = String(rawSource).trim();
-                    
-                    // 模糊与精准比对 23 种来源
                     for (const item of this.sourceList) {
                         const cleanItemName = item.name.replace(/^GR-/, '').replace(/^⭐/, '');
                         if (str === item.name || str.includes(cleanItemName) || cleanItemName.includes(str)) {
                             return { source: item.name, price: item.price };
                         }
                     }
-
-                    // 关键字特殊智能归类
                     if (str.includes('抖音') && str.includes('信息流')) return { source: 'GR-抖音信息流', price: 85 };
                     if (str.includes('抖音')) return { source: 'GR-抖音投放', price: 55 };
                     if (str.includes('百度')) return { source: 'GR-百度推广', price: 35 };
@@ -513,19 +598,7 @@
                     if (str.includes('借条')) return { source: 'GR-⭐借条', price: 13 };
                     if (str.includes('商城')) return { source: 'GR-⭐商城申下', price: 8 };
 
-                    // 若提供有具体价格则优先采用，无则默认 20
                     return { source: str, price: Number(rawPrice) || 20 };
-                },
-
-                // Excel 时间解析修复助手
-                parseExcelTime(rawTime) {
-                    if (!rawTime) return new Date().toLocaleString();
-                    if (typeof rawTime === 'number') {
-                        // 兼容 Excel 内部天数序列号
-                        const jsDate = new Date((rawTime - (25567 + 2)) * 86400 * 1000);
-                        return jsDate.toLocaleString();
-                    }
-                    return String(rawTime).trim();
                 },
 
                 handleFileUpload(e) {
@@ -542,13 +615,7 @@
                             if (p && String(p).replace(/[^0-9]/g, '').length === 11) {
                                 const rawSrc = row['来源'] || row['数据来源'] || row['渠道'] || row['source'];
                                 const rawPrc = row['单价'] || row['价格'] || row['price'];
-                                
-                                // 智能归类与标价计算
                                 const { source, price } = this.matchSourceAndPrice(rawSrc, rawPrc);
-                                
-                                // 时间列提取与处理
-                                const rawTime = row['录入时间'] || row['创建时间'] || row['时间'] || row['日期'] || row['date'] || row['time'];
-                                const createTime = this.parseExcelTime(rawTime);
 
                                 insertList.push({
                                     name: String(row['姓名'] || row['客户姓名'] || row['客户'] || '无'),
@@ -556,14 +623,14 @@
                                     phone: String(p).replace(/[^0-9]/g, ''),
                                     region: String(row['地区'] || row['城市'] || row['省份'] || '无'),
                                     source: source,
-                                    price: price,
-                                    create_time: createTime
+                                    price: price
                                 });
                             }
                         });
 
-                        socket.emit('add-batch-leads', insertList, (res) => {
-                            Swal.fire('导入完成', '新导入 ' + res.addedCount + ' 条新线索！（智能分类归类并标价完成，查重拦截 ' + res.duplicateCount + ' 条）', 'success');
+                        socket.emit('add-batch-leads', { insertList, mode: this.importMode }, (res) => {
+                            const modeText = res.mode === 'drip' ? '已成功放入【定时匀速滴灌队列】，系统将全天陆续自动放线索！' : '已【直接全量入库】！';
+                            Swal.fire('导入完成', '成功处理 ' + res.addedCount + ' 条线索（' + modeText + '）', 'success');
                             e.target.value = '';
                         });
                     };
