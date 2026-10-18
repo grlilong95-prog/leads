@@ -160,9 +160,17 @@
                                         <td class="p-3">{{ lead.gender }}</td>
                                         <td class="p-3">{{ lead.region }}</td>
                                         <td class="p-3"><span class="bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-100 text-xs font-medium">{{ lead.source }}</span></td>
-                                        <td class="p-3 font-bold text-red-500 font-mono-tech">¥{{ lead.price }}</td>
+                                        <td class="p-3 font-bold font-mono-tech">
+                                            <span class="text-red-500">¥{{ lead.price }}</span>
+                                            <span v-if="lead.isDiscount50" class="ml-1 bg-red-100 text-red-600 text-[10px] px-1 rounded border border-red-200">5折特惠</span>
+                                            <span v-else-if="lead.isDiscount20" class="ml-1 bg-orange-100 text-orange-600 text-[10px] px-1 rounded border border-orange-200">8折捡漏</span>
+                                        </td>
                                         <td class="p-3 font-mono-tech">
-                                            <span v-if="isUnlocked(lead.id) || currentUser?.role === 'admin'" class="text-emerald-600 font-bold bg-emerald-50 px-2 py-1 rounded"><i class="fa-solid fa-lock-open mr-1"></i>{{ lead.phone }}</span>
+                                            <div v-if="isUnlocked(lead.id) || currentUser?.role === 'admin'" class="flex items-center space-x-1">
+                                                <span class="text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200"><i class="fa-solid fa-lock-open mr-1"></i>{{ lead.phone }}</span>
+                                                <a :href="'tel:' + lead.phone" class="bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 px-1.5 py-0.5 rounded text-xs font-bold" title="一键拨号"><i class="fa-solid fa-phone"></i></a>
+                                                <button @click="copyPhone(lead.phone)" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border px-1.5 py-0.5 rounded text-xs font-bold" title="一键复制"><i class="fa-solid fa-copy"></i></button>
+                                            </div>
                                             <span v-else class="text-slate-400"><i class="fa-solid fa-lock mr-1"></i>{{ maskPhone(lead.phone) }}</span>
                                         </td>
                                         <td class="p-3 text-xs text-slate-400 font-mono-tech">{{ lead.create_time }}</td>
@@ -201,10 +209,73 @@
 
                 <!-- 2. 管理员控制台 -->
                 <div v-if="currentTab === 'admin' && currentUser?.role === 'admin'" class="space-y-6">
-                    <div class="flex space-x-2 border-b pb-2">
-                        <button @click="adminSubTab = 'import'" :class="adminSubTab === 'import' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm">录入/WPS导入查重</button>
-                        <button @click="adminSubTab = 'users'" :class="adminSubTab === 'users' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm">子账号管控与充值</button>
-                        <button @click="adminSubTab = 'history'" :class="adminSubTab === 'history' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm">全员提取流水</button>
+                    <div class="flex space-x-2 border-b pb-2 flex-wrap gap-2">
+                        <button @click="adminSubTab = 'analytics'" :class="adminSubTab === 'analytics' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-chart-line mr-1.5"></i>数据 ROI & 业绩大盘</button>
+                        <button @click="adminSubTab = 'import'" :class="adminSubTab === 'import' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-file-import mr-1.5"></i>录入与定时滴灌</button>
+                        <button @click="adminSubTab = 'users'" :class="adminSubTab === 'users' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-users-gear mr-1.5"></i>子账号管控与充值</button>
+                        <button @click="adminSubTab = 'history'" :class="adminSubTab === 'history' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-receipt mr-1.5"></i>全员提取流水</button>
+                    </div>
+
+                    <!-- 数据 ROI 评估与大盘看板 -->
+                    <div v-if="adminSubTab === 'analytics'" class="space-y-6">
+                        <!-- 核心指标卡片 -->
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                            <div class="bg-white p-5 rounded-xl border tech-card">
+                                <div class="text-xs text-slate-500 font-bold mb-1">系统累计总流水收益</div>
+                                <div class="text-2xl font-bold text-emerald-600 font-mono-tech">¥{{ totalRevenue.toLocaleString() }}</div>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border tech-card">
+                                <div class="text-xs text-slate-500 font-bold mb-1">总提取购买量</div>
+                                <div class="text-2xl font-bold text-blue-600 font-mono-tech">{{ purchaseLogs.length }} <span class="text-xs text-slate-400 font-normal">次</span></div>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border tech-card">
+                                <div class="text-xs text-slate-500 font-bold mb-1">当前池内有效线索</div>
+                                <div class="text-2xl font-bold text-amber-600 font-mono-tech">{{ leads.length }} <span class="text-xs text-slate-400 font-normal">条</span></div>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border tech-card">
+                                <div class="text-xs text-slate-500 font-bold mb-1">冷库自动归档死库</div>
+                                <div class="text-2xl font-bold text-slate-500 font-mono-tech">{{ archivedCount }} <span class="text-xs text-slate-400 font-normal">条</span></div>
+                            </div>
+                        </div>
+
+                        <!-- 渠道 ROI 分析表格 -->
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div class="bg-white p-5 rounded-xl border tech-card">
+                                <h4 class="font-bold text-slate-800 mb-4 flex items-center"><i class="fa-solid fa-sack-dollar text-yellow-500 mr-2"></i>渠道线索销售 ROI 排行榜</h4>
+                                <div class="overflow-x-auto">
+                                    <table class="w-full text-left text-xs">
+                                        <thead>
+                                            <tr class="bg-slate-50 border-b"><th class="p-2">渠道名称</th><th class="p-2">已售次数</th><th class="p-2">贡献总流水</th></tr>
+                                        </thead>
+                                        <tbody class="divide-y">
+                                            <tr v-for="source in sourceAnalytics" :key="source.name">
+                                                <td class="p-2 font-bold">{{ source.name }}</td>
+                                                <td class="p-2 font-mono-tech">{{ source.count }} 次</td>
+                                                <td class="p-2 font-bold text-emerald-600 font-mono-tech">¥{{ source.revenue }}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="bg-white p-5 rounded-xl border tech-card">
+                                <h4 class="font-bold text-slate-800 mb-4 flex items-center"><i class="fa-solid fa-trophy text-amber-500 mr-2"></i>业务员消耗与提线索 TOP 榜</h4>
+                                <div class="overflow-x-auto">
+                                    <table class="w-full text-left text-xs">
+                                        <thead>
+                                            <tr class="bg-slate-50 border-b"><th class="p-2">业务员账号</th><th class="p-2">提取线索数</th><th class="p-2">消耗总金额</th></tr>
+                                        </thead>
+                                        <tbody class="divide-y">
+                                            <tr v-for="user in userAnalytics" :key="user.username">
+                                                <td class="p-2 font-bold text-blue-600">{{ user.username }}</td>
+                                                <td class="p-2 font-mono-tech">{{ user.count }} 条</td>
+                                                <td class="p-2 font-bold text-red-500 font-mono-tech">¥{{ user.spent }}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div v-if="adminSubTab === 'import'" class="space-y-6">
@@ -281,7 +352,6 @@
                             <div class="bg-white rounded-xl border p-5 tech-card">
                                 <h3 class="font-bold mb-2 text-slate-800"><i class="fa-solid fa-file-excel text-emerald-600 mr-2"></i>批量导入 WPS / Excel (.xlsx)</h3>
                                 
-                                <!-- 导入模式选择器 -->
                                 <div class="mb-3 p-2 bg-slate-50 border rounded-lg flex items-center justify-around text-xs font-bold">
                                     <label class="flex items-center space-x-1 cursor-pointer">
                                         <input type="radio" v-model="importMode" value="drip" class="text-blue-600">
@@ -359,12 +429,18 @@
                     <div class="overflow-x-auto">
                         <table class="w-full text-left border-collapse text-sm">
                             <thead>
-                                <tr class="bg-slate-100 border-b text-slate-600"><th class="p-3">姓名</th><th class="p-3">明文电话</th><th class="p-3">地区</th><th class="p-3">来源</th><th class="p-3">花费</th></tr>
+                                <tr class="bg-slate-100 border-b text-slate-600"><th class="p-3">姓名</th><th class="p-3">明文电话/拨号/复制</th><th class="p-3">地区</th><th class="p-3">来源</th><th class="p-3">花费</th></tr>
                             </thead>
                             <tbody class="divide-y">
                                 <tr v-for="lead in myUnlockedLeads" :key="lead.id">
                                     <td class="p-3 font-bold text-slate-700">{{ lead.name }}</td>
-                                    <td class="p-3 font-mono-tech font-bold text-emerald-600 bg-emerald-50 rounded px-2">{{ lead.phone }}</td>
+                                    <td class="p-3 font-mono-tech font-bold">
+                                        <div class="flex items-center space-x-2">
+                                            <span class="text-emerald-600 bg-emerald-50 rounded px-2 py-0.5 border border-emerald-200">{{ lead.phone }}</span>
+                                            <a :href="'tel:' + lead.phone" class="bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 px-2 py-0.5 rounded text-xs" title="一键拨号"><i class="fa-solid fa-phone mr-1"></i>拨号</a>
+                                            <button @click="copyPhone(lead.phone)" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border px-2 py-0.5 rounded text-xs" title="一键复制"><i class="fa-solid fa-copy mr-1"></i>复制</button>
+                                        </div>
+                                    </td>
                                     <td class="p-3">{{ lead.region }}</td>
                                     <td class="p-3 text-xs"><span class="bg-blue-50 text-blue-600 px-2 py-0.5 rounded border border-blue-100">{{ lead.source }}</span></td>
                                     <td class="p-3 text-red-500 font-bold font-mono-tech">¥{{ lead.price }}</td>
@@ -389,14 +465,14 @@
                     currentUser: null,
                     loginForm: { username: '', password: '' },
                     currentTab: 'pool',
-                    adminSubTab: 'import',
+                    adminSubTab: 'analytics',
                     selectedLeadIds: [],
                     filters: { region: '', phoneTail: '', source: '' },
                     currentPage: 1, pageSize: 10, jumpPage: '',
                     
-                    // 匀速滴灌导入控制参数
-                    importMode: 'drip', // drip: 匀速滴灌, instant: 立即入库
+                    importMode: 'drip',
                     queueCount: 0,
+                    archivedCount: 0,
                     dripConfig: { enabled: true, countPerBatch: 5, intervalSeconds: 60 },
 
                     sourceList: [
@@ -414,6 +490,29 @@
                 }
             },
             computed: {
+                totalRevenue() {
+                    return (this.purchaseLogs || []).reduce((sum, log) => sum + (Number(log.price) || 0), 0);
+                },
+                sourceAnalytics() {
+                    const map = {};
+                    (this.purchaseLogs || []).forEach(log => {
+                        const s = log.source || '未知来源';
+                        if (!map[s]) map[s] = { name: s, count: 0, revenue: 0 };
+                        map[s].count++;
+                        map[s].revenue += Number(log.price) || 0;
+                    });
+                    return Object.values(map).sort((a, b) => b.revenue - a.revenue);
+                },
+                userAnalytics() {
+                    const map = {};
+                    (this.purchaseLogs || []).forEach(log => {
+                        const u = log.username || '未知';
+                        if (!map[u]) map[u] = { username: u, count: 0, spent: 0 };
+                        map[u].count++;
+                        map[u].spent += Number(log.price) || 0;
+                    });
+                    return Object.values(map).sort((a, b) => b.spent - a.spent);
+                },
                 filteredLeads() {
                     if (!Array.isArray(this.leads)) return [];
                     const regFilter = (this.filters.region || '').trim().toLowerCase();
@@ -460,8 +559,21 @@
                 this.checkLocalSession();
                 if (this.isLoggedIn) this.fetchAllData();
                 socket.on('realtime-db-update', () => this.fetchAllData());
+                
+                // 账号抢占被挤下线监听
+                socket.on('force-logout', (msg) => {
+                    Swal.fire('被迫下线', msg, 'warning').then(() => {
+                        this.logout();
+                    });
+                });
             },
             methods: {
+                copyPhone(phone) {
+                    if (!phone) return;
+                    navigator.clipboard.writeText(phone).then(() => {
+                        Swal.fire({ toast: true, position: 'top-end', icon: 'success', title: '号码已复制到剪贴板！', showConfirmButton: false, timer: 1500 });
+                    });
+                },
                 checkLocalSession() {
                     try {
                         const saved = localStorage.getItem('loan_system_user');
@@ -479,6 +591,7 @@
                         this.leads = data.leads || [];
                         this.purchaseLogs = data.purchaseLogs || [];
                         this.queueCount = data.queueCount || 0;
+                        this.archivedCount = data.archivedCount || 0;
                         if (data.dripConfig) this.dripConfig = data.dripConfig;
 
                         if (this.currentUser) {
@@ -492,7 +605,6 @@
                     });
                 },
 
-                // 保存匀速滴灌频率配置
                 saveDripConfig() {
                     socket.emit('update-drip-config', this.dripConfig, () => {
                         Swal.fire('保存成功', `已调整为：每隔 ${this.dripConfig.intervalSeconds} 秒自动投放 ${this.dripConfig.countPerBatch} 条线索！`, 'success');
