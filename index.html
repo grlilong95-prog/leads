@@ -114,10 +114,6 @@
                     <div class="bg-white rounded-xl shadow-sm border p-5 tech-card">
                         <div class="flex justify-between items-center mb-4 pb-2 border-b font-bold text-slate-800">
                             <span><i class="fa-solid fa-magnifying-glass text-blue-600 mr-2"></i>线索筛选 (全部: <b class="text-blue-600">{{ leads?.length || 0 }}</b> 条 / 结果: <b class="text-amber-600">{{ filteredLeads?.length || 0 }}</b> 条)</span>
-                            <!-- 定时排队监控小组件 -->
-                            <span v-if="queueCount > 0" class="text-xs font-normal bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-full border border-indigo-100 animate-pulse">
-                                ⏳ 仿真实时入库排队中: <b>{{ queueCount }}</b> 条 (隔{{ dripConfig.intervalSeconds }}秒自动释放{{ dripConfig.countPerBatch }}条)
-                            </span>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <input v-model.trim="filters.region" placeholder="按地区搜索" class="bg-slate-50 border rounded-lg px-3 py-2 text-sm outline-none">
