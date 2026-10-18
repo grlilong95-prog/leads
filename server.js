@@ -56,7 +56,7 @@ io.on('connection', (socket) => {
             region: leadData.region || '无',
             source: leadData.source || '无',
             price: Number(leadData.price) || 20,
-            create_time: new Date().toLocaleString()
+            create_time: leadData.create_time || new Date().toLocaleString()
         };
         db.leads.unshift(newLead);
         io.emit('realtime-db-update');
@@ -82,7 +82,7 @@ io.on('connection', (socket) => {
                     region: item.region || '无',
                     source: item.source || 'WPS批量导入',
                     price: Number(item.price) || 20,
-                    create_time: new Date().toLocaleString()
+                    create_time: item.create_time || new Date().toLocaleString()
                 });
                 added++;
             }
