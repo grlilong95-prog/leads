@@ -1,6 +1,8 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -8,7 +10,7 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(express.json());
 
-// 全局内存数据库（异地实时共享）
+// 全局内存数据库（支持异地实时共享）
 let db = {
     users: [
         { id: 'u_admin', username: 'admin', password: 'admin888', role: 'admin', balance: 999999, can_access: true, can_extract: true, status: 'normal' }
@@ -17,9 +19,17 @@ let db = {
     purchaseLogs: []
 };
 
-// 单文件直接响应网页，100% 避免找不到 index.html 文件
+// 页面路由：优先读取文件，防止符号冲突导致白屏
 app.get('/', (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    
+    const p1 = path.join(__dirname, 'public', 'index.html');
+    const p2 = path.join(__dirname, 'index.html');
+    
+    if (fs.existsSync(p1)) return res.sendFile(p1);
+    if (fs.existsSync(p2)) return res.sendFile(p2);
+
+    // 备用内能网页（安全符号转义版）
     res.send(`
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -462,7 +472,7 @@ app.get('/', (req, res) => {
                     });
                 },
                 logout() { this.isLoggedIn = false; this.currentUser = null; localStorage.removeItem('loan_system_user'); },
-                maskPhone(phone) { return phone ? String(phone).replace(/(\\d{3})\\d{4}(\\d{4})/, '$1****$2') : ''; },
+                maskPhone(phone) { return phone ? String(phone).replace(/(\\d{3})\\d{4}(\\d{4})/, '\$1****\$2') : ''; },
                 isUnlocked(leadId) {
                     if (!this.currentUser) return false;
                     const curUser = String(this.currentUser.username).trim();
