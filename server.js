@@ -2,13 +2,31 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(express.json());
+
+// 自动兼容两种存放路径（不管 index.html 是在根目录还是在 public 文件夹）
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
+
+// 显式拦截根路径，确保必定能打开网页
+app.get('/', (req, res) => {
+    const publicIndex = path.join(__dirname, 'public', 'index.html');
+    const rootIndex = path.join(__dirname, 'index.html');
+    
+    if (fs.existsSync(publicIndex)) {
+        res.sendFile(publicIndex);
+    } else if (fs.existsSync(rootIndex)) {
+        res.sendFile(rootIndex);
+    } else {
+        res.status(404).send('<h2>未找到 index.html 网页文件，请检查 GitHub 仓库是否上传了 index.html</h2>');
+    }
+});
 
 let db = {
     users: [
