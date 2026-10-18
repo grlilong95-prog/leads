@@ -9,27 +9,17 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(express.json());
-
-// 静态文件服务：同时支持根目录与 public 目录
 app.use(express.static(__dirname));
-app.use(express.static(path.join(__dirname, 'public')));
 
-// 首页路由拦截：保障 100% 能读取到 index.html
 app.get('/', (req, res) => {
     const rootHtml = path.join(__dirname, 'index.html');
-    const publicHtml = path.join(__dirname, 'public', 'index.html');
-    
     if (fs.existsSync(rootHtml)) {
-        return res.sendFile(rootHtml);
-    } else if (fs.existsSync(publicHtml)) {
-        return res.sendFile(publicHtml);
+        res.sendFile(rootHtml);
     } else {
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send('<h2 style="text-align:center;margin-top:50px;color:red;">服务器运行正常，但未在 GitHub 根目录找到 index.html 文件！<br>请在 GitHub 根目录新建 index.html 文件并粘贴代码。</h2>');
+        res.status(404).send('Not Found index.html');
     }
 });
 
-// 全局内存数据库（异地实时共享，重启后重置）
 let db = {
     users: [
         { id: 'u_admin', username: 'admin', password: 'admin888', role: 'admin', balance: 999999, can_access: true, can_extract: true, status: 'normal' }
@@ -39,22 +29,19 @@ let db = {
 };
 
 io.on('connection', (socket) => {
-    // 账号登录
     socket.on('login', ({ username, password }, callback) => {
         const user = db.users.find(u => u.username === username && u.password === password);
         if (!user) return callback({ success: false, message: '账号或密码错误！' });
         if (!user.can_access || user.status === 'banned') {
-            return callback({ success: false, message: '账号已被禁用，请联系客服处理！' });
+            return callback({ success: false, message: '账号已被禁用！' });
         }
         callback({ success: true, user });
     });
 
-    // 数据同步
     socket.on('fetch-all-data', (callback) => {
         callback({ users: db.users, leads: db.leads, purchaseLogs: db.purchaseLogs });
     });
 
-    // 单条手动录入 (自动查重)
     socket.on('add-manual-lead', (leadData, callback) => {
         const cleanPhone = String(leadData.phone || '').trim();
         const exist = db.leads.some(l => String(l.phone).trim() === cleanPhone);
@@ -76,7 +63,6 @@ io.on('connection', (socket) => {
         callback({ success: true });
     });
 
-    // Excel 批量导入 (自动查重)
     socket.on('add-batch-leads', (insertList, callback) => {
         let added = 0;
         let dup = 0;
@@ -106,7 +92,6 @@ io.on('connection', (socket) => {
         callback({ success: true, addedCount: added, duplicateCount: dup });
     });
 
-    // 扣费提取线索 (解锁明文)
     socket.on('extract-leads', ({ userId, targetLeads }, callback) => {
         const user = db.users.find(u => u.id === userId);
         if (!user) return callback({ success: false, message: '用户不存在' });
@@ -138,14 +123,12 @@ io.on('connection', (socket) => {
         callback({ success: true, newBalance: user.balance });
     });
 
-    // 删除线索
     socket.on('delete-leads', (leadIds, callback) => {
         db.leads = db.leads.filter(l => !leadIds.includes(l.id));
         io.emit('realtime-db-update');
         callback({ success: true });
     });
 
-    // 开通子账号
     socket.on('create-user', ({ username, password, balance }, callback) => {
         if (db.users.some(u => u.username === username)) {
             return callback({ success: false, message: '用户名已存在！' });
@@ -164,7 +147,6 @@ io.on('connection', (socket) => {
         callback({ success: true });
     });
 
-    // 修改子账号字段
     socket.on('update-user-field', ({ userId, updateData }, callback) => {
         const u = db.users.find(x => x.id === userId);
         if (u) {
@@ -176,4 +158,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`服务启动，端口: ${PORT}`));
+server.listen(PORT, () => console.log(`启动成功: ${PORT}`));
