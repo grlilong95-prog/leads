@@ -20,6 +20,7 @@ app.get('/', (req, res) => {
     }
 });
 
+// 全局数据状态
 let db = {
     users: [
         { id: 'u_admin', username: 'admin', password: 'admin888', role: 'admin', balance: 999999, can_access: true, can_extract: true, status: 'normal' }
@@ -27,6 +28,40 @@ let db = {
     leads: [],
     purchaseLogs: []
 };
+
+// 待发布缓冲队列与定时发布参数配置
+let importQueue = [];
+let dripConfig = {
+    enabled: true,       // 是否开启定时滴灌
+    countPerBatch: 5,    // 每次发布几条
+    intervalSeconds: 60  // 间隔多少秒（默认60秒/1分钟）
+};
+let dripTimer = null;
+
+// 核心定时器：匀速将队列数据释放到公共线索池
+function startDripScheduler() {
+    if (dripTimer) clearInterval(dripTimer);
+    dripTimer = setInterval(() => {
+        if (!dripConfig.enabled || importQueue.length === 0) return;
+
+        // 每次提取 countPerBatch 条数据
+        const count = Math.min(dripConfig.countPerBatch, importQueue.length);
+        const batch = importQueue.splice(0, count);
+
+        // 释放的那一刻，生成最新的“当下真实时间”！
+        const nowStr = new Date().toLocaleString();
+        batch.forEach(lead => {
+            lead.create_time = nowStr; 
+            db.leads.unshift(lead);
+        });
+
+        // 毫秒级全网广播：子账号页面自动弹出新数据
+        io.emit('realtime-db-update');
+    }, Math.max(2, dripConfig.intervalSeconds) * 1000);
+}
+
+// 启动定时任务
+startDripScheduler();
 
 io.on('connection', (socket) => {
     socket.on('login', ({ username, password }, callback) => {
@@ -38,16 +73,51 @@ io.on('connection', (socket) => {
         callback({ success: true, user });
     });
 
+    // 拉取全量数据 + 队列状态
     socket.on('fetch-all-data', (callback) => {
-        callback({ users: db.users, leads: db.leads, purchaseLogs: db.purchaseLogs });
+        callback({
+            users: db.users,
+            leads: db.leads,
+            purchaseLogs: db.purchaseLogs,
+            queueCount: importQueue.length,
+            dripConfig: dripConfig
+        });
     });
 
+    // 动态调整匀速发布参数
+    socket.on('update-drip-config', (config, callback) => {
+        dripConfig = { ...dripConfig, ...config };
+        startDripScheduler();
+        io.emit('realtime-db-update');
+        if (callback) callback({ success: true });
+    });
+
+    // 队列控制操作 (清空 / 立即全部释放)
+    socket.on('control-import-queue', (action, callback) => {
+        if (action === 'clear') {
+            importQueue = [];
+        } else if (action === 'release_all') {
+            const nowStr = new Date().toLocaleString();
+            importQueue.forEach(lead => {
+                lead.create_time = nowStr;
+                db.leads.unshift(lead);
+            });
+            importQueue = [];
+        }
+        io.emit('realtime-db-update');
+        if (callback) callback({ success: true });
+    });
+
+    // 手动录入线索
     socket.on('add-manual-lead', (leadData, callback) => {
         const cleanPhone = String(leadData.phone || '').trim();
-        const exist = db.leads.some(l => String(l.phone).trim() === cleanPhone);
-        if (exist) {
-            return callback({ success: false, message: `手机号 ${cleanPhone} 已存在！` });
+        const existInLeads = db.leads.some(l => String(l.phone).trim() === cleanPhone);
+        const existInQueue = importQueue.some(l => String(l.phone).trim() === cleanPhone);
+
+        if (existInLeads || existInQueue) {
+            return callback({ success: false, message: `手机号 ${cleanPhone} 已存在（或正在排队中）！` });
         }
+
         const newLead = {
             id: 'lead_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
             name: leadData.name || '无',
@@ -56,25 +126,28 @@ io.on('connection', (socket) => {
             region: leadData.region || '无',
             source: leadData.source || '无',
             price: Number(leadData.price) || 20,
-            create_time: leadData.create_time || new Date().toLocaleString()
+            create_time: new Date().toLocaleString()
         };
+
         db.leads.unshift(newLead);
         io.emit('realtime-db-update');
         callback({ success: true });
     });
 
-    socket.on('add-batch-leads', (insertList, callback) => {
+    // Excel 批量导入（支持直发或放入定时队列）
+    socket.on('add-batch-leads', ({ insertList, mode }, callback) => {
         let added = 0;
         let dup = 0;
-        const existingPhones = new Set(db.leads.map(l => String(l.phone).trim()));
+        const existingLeadsPhones = new Set(db.leads.map(l => String(l.phone).trim()));
+        const existingQueuePhones = new Set(importQueue.map(l => String(l.phone).trim()));
 
         insertList.forEach(item => {
             const cleanPhone = String(item.phone || '').trim();
-            if (existingPhones.has(cleanPhone)) {
+            if (existingLeadsPhones.has(cleanPhone) || existingQueuePhones.has(cleanPhone)) {
                 dup++;
             } else {
-                existingPhones.add(cleanPhone);
-                db.leads.unshift({
+                existingLeadsPhones.add(cleanPhone);
+                const leadObj = {
                     id: 'lead_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
                     name: item.name || '无',
                     gender: item.gender || '无',
@@ -83,13 +156,19 @@ io.on('connection', (socket) => {
                     source: item.source || 'WPS批量导入',
                     price: Number(item.price) || 20,
                     create_time: item.create_time || new Date().toLocaleString()
-                });
+                };
+
+                if (mode === 'drip') {
+                    importQueue.push(leadObj); // 进入定时释放队列
+                } else {
+                    db.leads.unshift(leadObj); // 立即全量入库
+                }
                 added++;
             }
         });
 
         io.emit('realtime-db-update');
-        callback({ success: true, addedCount: added, duplicateCount: dup });
+        callback({ success: true, addedCount: added, duplicateCount: dup, mode });
     });
 
     socket.on('extract-leads', ({ userId, targetLeads }, callback) => {
