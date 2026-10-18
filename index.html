@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>助贷网销线索管理系统 - 云端异地实时同步版</title>
 
-    <!-- Cloudflare 全球极速 CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.prod.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -41,7 +40,7 @@
 </head>
 <body class="text-slate-800 antialiased">
     <div id="app" v-cloak class="min-h-screen flex flex-col">
-        <!-- 登录界面 -->
+        <!-- 0. 登录界面 (优化1：默认清空，不再自动显示账号密码) -->
         <div v-if="!isLoggedIn" class="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-indigo-950 flex items-center justify-center p-4 w-full fixed inset-0 z-50">
             <div class="bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl max-w-md w-full p-8 border border-white/20 relative overflow-hidden tech-topbar">
                 <div class="text-center mb-8">
@@ -51,19 +50,19 @@
                     <h2 class="text-2xl font-bold text-slate-800">助贷网销线索系统</h2>
                     <p class="text-xs text-slate-500 mt-1">全网异地实时云同步版</p>
                 </div>
-                <form @submit.prevent="handleLogin" class="space-y-4">
+                <form @submit.prevent="handleLogin" class="space-y-4" autocomplete="off">
                     <div>
                         <label class="block text-xs font-semibold text-slate-600 mb-1">账号</label>
                         <div class="relative">
                             <i class="fa-solid fa-user absolute left-3 top-3 text-slate-400 text-sm"></i>
-                            <input v-model.trim="loginForm.username" required type="text" placeholder="请输入账号" class="w-full bg-slate-50 border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm outline-none">
+                            <input v-model.trim="loginForm.username" required type="text" placeholder="请输入账号" autocomplete="off" class="w-full bg-slate-50 border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm outline-none">
                         </div>
                     </div>
                     <div>
                         <label class="block text-xs font-semibold text-slate-600 mb-1">密码</label>
                         <div class="relative">
                             <i class="fa-solid fa-lock absolute left-3 top-3 text-slate-400 text-sm"></i>
-                            <input v-model.trim="loginForm.password" required type="password" placeholder="请输入密码" class="w-full bg-slate-50 border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm outline-none">
+                            <input v-model.trim="loginForm.password" required type="password" placeholder="请输入密码" autocomplete="new-password" class="w-full bg-slate-50 border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm outline-none">
                         </div>
                     </div>
                     <button type="submit" :disabled="isLoggingIn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm transition flex items-center justify-center">
@@ -240,7 +239,7 @@
 
                         <div class="bg-white rounded-xl border p-5 tech-card">
                             <h3 class="font-bold mb-2 text-slate-800"><i class="fa-solid fa-file-excel text-emerald-600 mr-2"></i>批量导入 WPS / Excel (.xlsx)</h3>
-                            <p class="text-xs text-slate-500 mb-4">💡 <b>提示：</b>表格仅需提供手机号列（表头叫`电话`、`手机号`等即可），自动去重。</p>
+                            <p class="text-xs text-slate-500 mb-4">💡 <b>提示：</b>无需严格表头，系统会自动识别“来源/抖音/百度/融360/大模型”等关键词并<b>自动归类标价</b>！</p>
                             <div class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center relative hover:bg-slate-50 cursor-pointer">
                                 <input type="file" @change="handleFileUpload" accept=".xlsx, .xls" class="absolute inset-0 opacity-0 cursor-pointer">
                                 <i class="fa-solid fa-cloud-arrow-up text-4xl text-slate-400 mb-2"></i>
@@ -334,7 +333,8 @@
                     isLoggingIn: false,
                     isProcessing: false,
                     currentUser: null,
-                    loginForm: { username: 'admin', password: 'admin888' },
+                    // 优化1：清空默认充填，打开网页不再自动填入 admin
+                    loginForm: { username: '', password: '' },
                     currentTab: 'pool',
                     adminSubTab: 'import',
                     selectedLeadIds: [],
@@ -488,6 +488,46 @@
                         else Swal.fire('查重拦截', res.message, 'warning');
                     });
                 },
+                
+                // 优化2与优化3：智能匹配来源归类 + 自动对应标价 + 时间智能格式化
+                matchSourceAndPrice(rawSource, rawPrice) {
+                    if (!rawSource) return { source: 'GR-网贷混合申请', price: 3 };
+                    const str = String(rawSource).trim();
+                    
+                    // 模糊与精准比对 23 种来源
+                    for (const item of this.sourceList) {
+                        const cleanItemName = item.name.replace(/^GR-/, '').replace(/^⭐/, '');
+                        if (str === item.name || str.includes(cleanItemName) || cleanItemName.includes(str)) {
+                            return { source: item.name, price: item.price };
+                        }
+                    }
+
+                    // 关键字特殊智能归类
+                    if (str.includes('抖音') && str.includes('信息流')) return { source: 'GR-抖音信息流', price: 85 };
+                    if (str.includes('抖音')) return { source: 'GR-抖音投放', price: 55 };
+                    if (str.includes('百度')) return { source: 'GR-百度推广', price: 35 };
+                    if (str.includes('融360') || str.includes('360')) return { source: 'GR-⭐融360', price: 65 };
+                    if (str.includes('平安')) return { source: 'GR-平安进审', price: 5 };
+                    if (str.includes('工行')) return { source: 'GR-工行进审', price: 5 };
+                    if (str.includes('车贷') || str.includes('车主')) return { source: 'GR-⭐CRM-车贷车主融', price: 15 };
+                    if (str.includes('借条')) return { source: 'GR-⭐借条', price: 13 };
+                    if (str.includes('商城')) return { source: 'GR-⭐商城申下', price: 8 };
+
+                    // 若提供有具体价格则优先采用，无则默认 20
+                    return { source: str, price: Number(rawPrice) || 20 };
+                },
+
+                // Excel 时间解析修复助手
+                parseExcelTime(rawTime) {
+                    if (!rawTime) return new Date().toLocaleString();
+                    if (typeof rawTime === 'number') {
+                        // 兼容 Excel 内部天数序列号
+                        const jsDate = new Date((rawTime - (25567 + 2)) * 86400 * 1000);
+                        return jsDate.toLocaleString();
+                    }
+                    return String(rawTime).trim();
+                },
+
                 handleFileUpload(e) {
                     const file = e.target.files[0]; if (!file) return;
                     const reader = new FileReader();
@@ -496,19 +536,40 @@
                         const workbook = XLSX.read(data, { type: 'array' });
                         const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
                         let insertList = [];
+
                         json.forEach(row => {
-                            const p = row['电话'] || row['手机号'] || row['phone'];
+                            const p = row['电话'] || row['手机号'] || row['电话号码'] || row['手机'] || row['phone'];
                             if (p && String(p).replace(/[^0-9]/g, '').length === 11) {
-                                insertList.push({ name: row['姓名']||'无', phone: String(p).replace(/[^0-9]/g, ''), region: row['地区']||'无', source: row['来源']||'WPS导入', price: Number(row['单价']||20) });
+                                const rawSrc = row['来源'] || row['数据来源'] || row['渠道'] || row['source'];
+                                const rawPrc = row['单价'] || row['价格'] || row['price'];
+                                
+                                // 智能归类与标价计算
+                                const { source, price } = this.matchSourceAndPrice(rawSrc, rawPrc);
+                                
+                                // 时间列提取与处理
+                                const rawTime = row['录入时间'] || row['创建时间'] || row['时间'] || row['日期'] || row['date'] || row['time'];
+                                const createTime = this.parseExcelTime(rawTime);
+
+                                insertList.push({
+                                    name: String(row['姓名'] || row['客户姓名'] || row['客户'] || '无'),
+                                    gender: String(row['性别'] || '无'),
+                                    phone: String(p).replace(/[^0-9]/g, ''),
+                                    region: String(row['地区'] || row['城市'] || row['省份'] || '无'),
+                                    source: source,
+                                    price: price,
+                                    create_time: createTime
+                                });
                             }
                         });
+
                         socket.emit('add-batch-leads', insertList, (res) => {
-                            Swal.fire('导入完成', '新导入 ' + res.addedCount + ' 条，重复拦截 ' + res.duplicateCount + ' 条', 'success');
+                            Swal.fire('导入完成', '新导入 ' + res.addedCount + ' 条新线索！（智能分类归类并标价完成，查重拦截 ' + res.duplicateCount + ' 条）', 'success');
                             e.target.value = '';
                         });
                     };
                     reader.readAsArrayBuffer(file);
                 },
+
                 batchDeleteLeads() {
                     socket.emit('delete-leads', this.selectedLeadIds, () => { this.selectedLeadIds = []; Swal.fire('已删除', '', 'success'); });
                 },
@@ -540,7 +601,7 @@
                     });
                 },
                 exportMyLeads() {
-                    const data = this.myUnlockedLeads.map(l => ({ '姓名': l.name, '明文电话': l.phone, '地区': l.region, '来源': l.source, '单价': l.price }));
+                    const data = this.myUnlockedLeads.map(l => ({ '姓名': l.name, '明文电话': l.phone, '地区': l.region, '来源': l.source, '单价': l.price, '录入时间': l.create_time }));
                     XLSX.writeFile(XLSX.utils.book_new(), '已提取线索_' + new Date().toLocaleDateString() + '.xlsx');
                 },
                 resetFilters() { this.filters = { region: '', phoneTail: '', source: '' }; },
