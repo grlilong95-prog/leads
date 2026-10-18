@@ -5,11 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>助贷网销线索管理系统 - 云端异地实时同步版</title>
 
+    <!-- Cloudflare 全球极速 CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.prod.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.prod.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdn.staticfile.org/limonte-sweetalert2/11.7.12/sweetalert2.all.min.js"></script>
-    <script src="https://cdn.staticfile.org/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11.7.12/dist/sweetalert2.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
 
     <style>
@@ -439,7 +440,14 @@
                     });
                 },
                 logout() { this.isLoggedIn = false; this.currentUser = null; localStorage.removeItem('loan_system_user'); },
-                maskPhone(phone) { return phone ? String(phone).replace(/(\d{3})\d{4}(\d{4})/, '$1****$2') : ''; },
+                maskPhone(phone) {
+                    if (!phone) return '';
+                    const p = String(phone).trim();
+                    if (p.length === 11) {
+                        return p.slice(0, 3) + '****' + p.slice(7);
+                    }
+                    return p;
+                },
                 isUnlocked(leadId) {
                     if (!this.currentUser) return false;
                     const curUser = String(this.currentUser.username).trim();
@@ -447,13 +455,13 @@
                 },
                 openLeadDetail(lead) {
                     Swal.fire({
-                        title: `客户: ${lead.name}`,
-                        html: `<div class="text-left text-sm space-y-2"><p><b>电话：</b><span class="text-emerald-600 font-bold font-mono-tech">${lead.phone}</span></p><p><b>地区：</b>${lead.region}</p><p><b>来源：</b>${lead.source}</p></div>`,
+                        title: '客户: ' + lead.name,
+                        html: '<div class="text-left text-sm space-y-2"><p><b>电话：</b><span class="text-emerald-600 font-bold font-mono-tech">' + lead.phone + '</span></p><p><b>地区：</b>' + lead.region + '</p><p><b>来源：</b>' + lead.source + '</p></div>',
                         icon: 'info'
                     });
                 },
                 extractSingle(lead) {
-                    Swal.fire({ title: '确认购买线索？', text: `扣除余额 ¥${lead.price}`, icon: 'question', showCancelButton: true }).then((r) => {
+                    Swal.fire({ title: '确认购买线索？', text: '扣除余额 ¥' + lead.price, icon: 'question', showCancelButton: true }).then((r) => {
                         if (r.isConfirmed) {
                             socket.emit('extract-leads', { userId: this.currentUser.id, targetLeads: [lead] }, (res) => {
                                 if (res.success) { this.currentUser.balance = res.newBalance; Swal.fire('提取成功', '', 'success'); }
@@ -465,7 +473,7 @@
                 batchExtract() {
                     const targetLeads = this.leads.filter(l => this.selectedLeadIds.includes(l.id) && !this.isUnlocked(l.id));
                     if (targetLeads.length === 0) return Swal.fire('提示', '线索已解锁过', 'info');
-                    Swal.fire({ title: `批量提取 ${targetLeads.length} 条线索`, icon: 'warning', showCancelButton: true }).then((r) => {
+                    Swal.fire({ title: '批量提取 ' + targetLeads.length + ' 条线索', icon: 'warning', showCancelButton: true }).then((r) => {
                         if (r.isConfirmed) {
                             socket.emit('extract-leads', { userId: this.currentUser.id, targetLeads }, (res) => {
                                 if (res.success) { this.currentUser.balance = res.newBalance; this.selectedLeadIds = []; Swal.fire('提取成功', '', 'success'); }
@@ -490,12 +498,12 @@
                         let insertList = [];
                         json.forEach(row => {
                             const p = row['电话'] || row['手机号'] || row['phone'];
-                            if (p && String(p).replace(/\D/g, '').length === 11) {
-                                insertList.push({ name: row['姓名']||'无', phone: String(p).replace(/\D/g, ''), region: row['地区']||'无', source: row['来源']||'WPS导入', price: Number(row['单价']||20) });
+                            if (p && String(p).replace(/[^0-9]/g, '').length === 11) {
+                                insertList.push({ name: row['姓名']||'无', phone: String(p).replace(/[^0-9]/g, ''), region: row['地区']||'无', source: row['来源']||'WPS导入', price: Number(row['单价']||20) });
                             }
                         });
                         socket.emit('add-batch-leads', insertList, (res) => {
-                            Swal.fire('导入完成', `新导入 ${res.addedCount} 条，重复拦截 ${res.duplicateCount} 条`, 'success');
+                            Swal.fire('导入完成', '新导入 ' + res.addedCount + ' 条，重复拦截 ' + res.duplicateCount + ' 条', 'success');
                             e.target.value = '';
                         });
                     };
@@ -508,7 +516,7 @@
                 createNewSubAccount() {
                     Swal.fire({
                         title: '开通新子账号',
-                        html: `<input id="u" class="swal2-input" placeholder="账号"><input id="p" class="swal2-input" placeholder="密码"><input id="b" type="number" class="swal2-input" placeholder="余额" value="0">`,
+                        html: '<input id="u" class="swal2-input" placeholder="账号"><input id="p" class="swal2-input" placeholder="密码"><input id="b" type="number" class="swal2-input" placeholder="余额" value="0">',
                         showCancelButton: true,
                         preConfirm: () => [document.getElementById('u').value, document.getElementById('p').value, document.getElementById('b').value]
                     }).then((r) => {
@@ -533,7 +541,7 @@
                 },
                 exportMyLeads() {
                     const data = this.myUnlockedLeads.map(l => ({ '姓名': l.name, '明文电话': l.phone, '地区': l.region, '来源': l.source, '单价': l.price }));
-                    XLSX.writeFile(XLSX.utils.book_new(), `已提取线索_${new Date().toLocaleDateString()}.xlsx`);
+                    XLSX.writeFile(XLSX.utils.book_new(), '已提取线索_' + new Date().toLocaleDateString() + '.xlsx');
                 },
                 resetFilters() { this.filters = { region: '', phoneTail: '', source: '' }; },
                 toggleSelectAll(e) {
