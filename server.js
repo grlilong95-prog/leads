@@ -79,7 +79,7 @@ io.on('connection', (socket) => {
             users: db.users,
             leads: db.leads,
             purchaseLogs: db.purchaseLogs,
-            queueCount: importQueue.length,
+            queueCount: importQueue.length, // 仅供管理员后台控制使用
             dripConfig: dripConfig
         });
     });
