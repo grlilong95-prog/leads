@@ -27,41 +27,64 @@ app.get('/', (req, res) => {
     }
 });
 
+// 精准北京时间字符串
 function getChinaTimeString(dateObj = new Date()) {
     return dateObj.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 }
 
-// 重新连接到你最开始存放数据的真实文件夹
-const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/?retryWrites=true&w=majority';
+// 精准北京时间小时 (0-23)
+function getBeijingHour() {
+    try {
+        const hourStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false });
+        return parseInt(hourStr, 10);
+    } catch (e) {
+        return new Date().getHours();
+    }
+}
+
+// 统一过滤清理手机号（只提取纯数字）
+function sanitizePhone(rawPhone) {
+    if (!rawPhone) return '';
+    return String(rawPhone).replace(/[^0-9]/g, '').trim();
+}
+
+// 数据库连接 (固定为 loan_leads_db)
+const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/loan_leads_db?retryWrites=true&w=majority';
 
 mongoose.set('bufferCommands', false);
-mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 5000 })
+mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, maxPoolSize: 10 })
     .then(() => {
         console.log('✅ 成功连接云端数据库！');
-        migrateOldData(); // 启动时自动检查并恢复旧数据
+        migrateOldData();
     })
     .catch(err => console.error('❌ 数据库连接暂时失败:', err));
 
 const UserSchema = new mongoose.Schema({
-    id: String, username: String, password: String, role: String,
-    balance: Number, can_access: Boolean, can_extract: Boolean, status: String
+    id: { type: String, index: true },
+    username: { type: String, unique: true, index: true },
+    password: String, role: String, balance: Number,
+    can_access: Boolean, can_extract: Boolean, status: String
 });
+
 const LeadSchema = new mongoose.Schema({
-    id: String, name: String, gender: String, phone: String, region: String,
-    source: String, price: Number, originalPrice: Number, create_time: String, timestamp: Number,
-    isDiscount20: Boolean, isDiscount50: Boolean, isArchived: { type: Boolean, default: false }
+    id: { type: String, unique: true, index: true },
+    name: String, gender: String,
+    phone: { type: String, index: true },
+    region: String, source: String, price: Number, originalPrice: Number,
+    create_time: String, timestamp: { type: Number, index: true },
+    isDiscount20: Boolean, isDiscount50: Boolean,
+    isArchived: { type: Boolean, default: false, index: true }
 });
-LeadSchema.index({ phone: 1 });
-LeadSchema.index({ isArchived: 1, timestamp: -1 });
 
 const QueueSchema = new mongoose.Schema({
-    id: String, name: String, gender: String, phone: String, region: String,
-    source: String, price: Number, originalPrice: Number
+    id: { type: String, unique: true, index: true },
+    name: String, gender: String,
+    phone: { type: String, index: true },
+    region: String, source: String, price: Number, originalPrice: Number
 });
-QueueSchema.index({ phone: 1 });
 
 const ConfigSchema = new mongoose.Schema({
-    key: { type: String, default: 'main' },
+    key: { type: String, default: 'main', unique: true },
     dripConfig: {
         enabled: Boolean,
         mode: { type: String, default: 'fixed' },
@@ -72,10 +95,12 @@ const ConfigSchema = new mongoose.Schema({
         onlyDaytime: { type: Boolean, default: true },
         lastDripTimestamp: { type: Number, default: 0 }
     },
-    importQueue: Array // 兼容旧版排队数据
+    importQueue: Array
 });
+
 const LogSchema = new mongoose.Schema({
-    id: String, username: String, lead_id: String, lead_name: String,
+    id: String, username: { type: String, index: true },
+    lead_id: { type: String, index: true }, lead_name: String,
     phone: String, price: Number, source: String, time: String
 });
 
@@ -85,39 +110,36 @@ const QueueItem = mongoose.model('QueueItem', QueueSchema);
 const Config = mongoose.model('Config', ConfigSchema);
 const PurchaseLog = mongoose.model('PurchaseLog', LogSchema);
 
-// 核心恢复函数：自动把旧格式里的上万条排队数据迁移到新表中，绝不丢失！
 async function migrateOldData() {
     try {
         const config = await Config.findOne({ key: 'main' });
         if (config && config.importQueue && config.importQueue.length > 0) {
-            console.log(`检测到旧队列中有 ${config.importQueue.length} 条数据，正在自动恢复转移...`);
+            console.log(`检测到旧队列中有 ${config.importQueue.length} 条数据，开始搬迁...`);
             const oldQueue = config.importQueue;
             const docsToInsert = oldQueue.map(item => ({
                 id: item.id || ('lead_' + Date.now() + '_' + Math.floor(Math.random() * 10000)),
                 name: item.name || '无',
                 gender: item.gender || '无',
-                phone: item.phone,
+                phone: sanitizePhone(item.phone),
                 region: item.region || '无',
                 source: item.source || '批量导入',
                 price: Number(item.price) || 20,
                 originalPrice: Number(item.price) || 20
             }));
 
-            // 分批导入新表，防止超内存
-            const batchSize = 1000;
+            const batchSize = 2000;
             for (let i = 0; i < docsToInsert.length; i += batchSize) {
                 const chunk = docsToInsert.slice(i, i + batchSize);
-                await QueueItem.insertMany(chunk);
+                await QueueItem.insertMany(chunk, { ordered: false });
             }
 
-            // 清空旧的大数组，释放内存
             config.importQueue = [];
             await config.save();
-            console.log('✅ 数据已完美恢复并搬迁完毕！');
+            console.log('✅ 数据平滑迁移完毕！');
             io.emit('realtime-db-update');
         }
     } catch (e) {
-        console.error('自动恢复旧数据时出错:', e);
+        console.error('迁移提示:', e.message);
     }
 }
 
@@ -144,7 +166,7 @@ async function initDB() {
         }
     } catch (e) {}
 }
-setTimeout(initDB, 3000);
+setTimeout(initDB, 2000);
 
 const activeUserSockets = new Map();
 
@@ -166,8 +188,8 @@ async function runDripLoop() {
                     if (now - lastTime >= intervalMs) {
                         let canRelease = true;
                         if (config.dripConfig.onlyDaytime !== false) {
-                            const currentHour = parseInt(new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }));
-                            if (currentHour < 8 || currentHour >= 22) {
+                            const bjHour = getBeijingHour();
+                            if (bjHour < 8 || bjHour >= 22) {
                                 canRelease = false;
                             }
                         }
@@ -210,10 +232,10 @@ async function runDripLoop() {
             }
         }
     } catch (err) {
-        console.error('滴灌执行异常:', err);
+        console.error('滴灌提示:', err.message);
     } finally {
         isDripRunning = false;
-        setTimeout(runDripLoop, 5000);
+        setTimeout(runDripLoop, 4000);
     }
 }
 runDripLoop();
@@ -256,7 +278,7 @@ async function runAgingJob() {
             io.emit('realtime-db-update');
         }
     } catch (e) {
-        console.error('降价引擎异常:', e);
+        console.error('降价提示:', e.message);
     }
 }
 setInterval(runAgingJob, 10 * 60 * 1000);
@@ -293,17 +315,18 @@ io.on('connection', (socket) => {
                 return callback({ users: [], leads: [], archivedCount: 0, purchaseLogs: [], queueCount: 0, dripConfig: {} });
             }
 
-            const users = await User.find({}).lean() || [];
-            const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }).lean() || [];
+            const users = await User.find({}).select('-password').lean() || [];
+            const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }).limit(3000).lean() || [];
 
+            const activeLeads = await Lead.find({ isArchived: false }).sort({ timestamp: -1 }).lean() || [];
             const purchasedLeadIds = purchaseLogs.map(l => String(l.lead_id));
-            const leads = await Lead.find({
-                $or: [
-                    { isArchived: false },
-                    { id: { $in: purchasedLeadIds } }
-                ]
-            }).sort({ timestamp: -1 }).lean() || [];
+            
+            let purchasedArchivedLeads = [];
+            if (purchasedLeadIds.length > 0) {
+                purchasedArchivedLeads = await Lead.find({ id: { $in: purchasedLeadIds }, isArchived: true }).lean() || [];
+            }
 
+            const leads = [...activeLeads, ...purchasedArchivedLeads];
             const archivedCount = await Lead.countDocuments({ isArchived: true }) || 0;
             const queueCount = await QueueItem.countDocuments({}) || 0;
             const config = await Config.findOne({ key: 'main' }).lean();
@@ -323,7 +346,7 @@ io.on('connection', (socket) => {
                 dripConfig: config ? { ...defaultDrip, ...config.dripConfig } : defaultDrip
             });
         } catch (e) {
-            console.error('拉取数据异常:', e);
+            console.error('拉取数据异常:', e.message);
         }
     });
 
@@ -366,7 +389,11 @@ io.on('connection', (socket) => {
 
     socket.on('add-manual-lead', async (leadData, callback) => {
         try {
-            const cleanPhone = String(leadData.phone || '').trim();
+            const cleanPhone = sanitizePhone(leadData.phone);
+            if (cleanPhone.length !== 11) {
+                return callback({ success: false, message: '请输入正确的 11 位手机号！' });
+            }
+
             const existInLeads = await Lead.findOne({ phone: cleanPhone }).lean();
             const existInQueue = await QueueItem.findOne({ phone: cleanPhone }).lean();
 
@@ -401,19 +428,31 @@ io.on('connection', (socket) => {
             const now = Date.now();
             const chinaTime = getChinaTimeString(new Date(now));
 
+            const incomingPhones = insertList
+                .map(item => sanitizePhone(item.phone))
+                .filter(p => p.length === 11);
+
+            const existingLeads = await Lead.find({ phone: { $in: incomingPhones } }).select('phone').lean();
+            const existingQueues = await QueueItem.find({ phone: { $in: incomingPhones } }).select('phone').lean();
+
+            const existingPhoneSet = new Set([
+                ...existingLeads.map(l => l.phone),
+                ...existingQueues.map(q => q.phone)
+            ]);
+
             const queueDocs = [];
             const leadDocs = [];
 
             for (let item of insertList) {
-                const cleanPhone = String(item.phone || '').trim();
-                const existInDb = await Lead.findOne({ phone: cleanPhone }).lean();
-                const existInQueue = await QueueItem.findOne({ phone: cleanPhone }).lean();
+                const cleanPhone = sanitizePhone(item.phone);
+                if (cleanPhone.length !== 11) continue;
 
-                if (existInDb || existInQueue) {
+                if (existingPhoneSet.has(cleanPhone)) {
                     dup++;
                 } else {
+                    existingPhoneSet.add(cleanPhone);
                     const leadObj = {
-                        id: 'lead_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
+                        id: 'lead_' + Date.now() + '_' + Math.floor(Math.random() * 100000),
                         name: item.name || '无',
                         gender: item.gender || '无',
                         phone: cleanPhone,
@@ -434,8 +473,8 @@ io.on('connection', (socket) => {
                 }
             }
 
-            if (queueDocs.length > 0) await QueueItem.insertMany(queueDocs);
-            if (leadDocs.length > 0) await Lead.insertMany(leadDocs);
+            if (queueDocs.length > 0) await QueueItem.insertMany(queueDocs, { ordered: false });
+            if (leadDocs.length > 0) await Lead.insertMany(leadDocs, { ordered: false });
 
             io.emit('realtime-db-update');
             callback({ success: true, addedCount: added, duplicateCount: dup, mode });
@@ -444,15 +483,25 @@ io.on('connection', (socket) => {
         }
     });
 
+    // 核心安全优化：服务端查询数据库真实价格扣费（防止前端恶意修改价格）
     socket.on('extract-leads', async ({ userId, targetLeads }, callback) => {
         try {
             const user = await User.findOne({ id: userId });
             if (!user) return callback({ success: false, message: '用户不存在' });
             if (!user.can_extract) return callback({ success: false, message: '账号无提取权限！' });
 
-            const totalPrice = targetLeads.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+            const targetIds = targetLeads.map(l => String(l.id));
+            const dbLeads = await Lead.find({ id: { $in: targetIds } }).lean();
+
+            if (dbLeads.length === 0) {
+                return callback({ success: false, message: '选择的线索不存在或已被删除！' });
+            }
+
+            // 计算数据库真实价格
+            const totalPrice = dbLeads.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+
             if (user.role !== 'admin' && user.balance < totalPrice) {
-                return callback({ success: false, message: `余额不足，所需 ¥${totalPrice}，余额 ¥${user.balance}` });
+                return callback({ success: false, message: `余额不足，所需 ¥${totalPrice}，当前余额 ¥${user.balance}` });
             }
 
             if (user.role !== 'admin') {
@@ -461,7 +510,7 @@ io.on('connection', (socket) => {
             }
 
             const nowStr = getChinaTimeString();
-            const logDocs = targetLeads.map(lead => ({
+            const logDocs = dbLeads.map(lead => ({
                 id: 'log_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
                 username: user.username,
                 lead_id: String(lead.id),
