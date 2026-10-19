@@ -211,7 +211,7 @@
                 <div v-if="currentTab === 'admin' && currentUser?.role === 'admin'" class="space-y-6">
                     <div class="flex space-x-2 border-b pb-2 flex-wrap gap-2">
                         <button @click="adminSubTab = 'analytics'" :class="adminSubTab === 'analytics' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-chart-line mr-1.5"></i>数据 ROI & 业绩大盘</button>
-                        <button @click="adminSubTab = 'import'" :class="adminSubTab === 'import' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-file-import mr-1.5"></i>录入与定时滴灌</button>
+                        <button @click="adminSubTab = 'import'" :class="adminSubTab === 'import' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-file-import mr-1.5"></i>录入与定时滴灌关卡</button>
                         <button @click="adminSubTab = 'users'" :class="adminSubTab === 'users' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-users-gear mr-1.5"></i>子账号管控与充值</button>
                         <button @click="adminSubTab = 'history'" :class="adminSubTab === 'history' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-receipt mr-1.5"></i>全员提取流水</button>
                     </div>
@@ -276,6 +276,7 @@
                     </div>
 
                     <div v-if="adminSubTab === 'import'" class="space-y-6">
+                        <!-- 支持随机/固定、白天限制的滴灌引擎控制器 -->
                         <div class="bg-gradient-to-r from-indigo-900 to-blue-900 text-white rounded-xl p-5 shadow-md">
                             <div class="flex justify-between items-center flex-wrap gap-3 mb-3 border-b border-white/10 pb-3">
                                 <div class="flex items-center space-x-2">
@@ -287,15 +288,52 @@
                                 </div>
                             </div>
 
+                            <!-- 模式与白天限制选择器 -->
+                            <div class="mb-4 flex flex-wrap items-center gap-4 text-xs bg-white/10 p-2.5 rounded-lg">
+                                <div class="flex items-center space-x-3">
+                                    <span class="font-bold opacity-90">投放模式：</span>
+                                    <label class="flex items-center space-x-1 cursor-pointer">
+                                        <input type="radio" v-model="dripConfig.mode" value="fixed" class="text-yellow-400">
+                                        <span>固定条数模式</span>
+                                    </label>
+                                    <label class="flex items-center space-x-1 cursor-pointer">
+                                        <input type="radio" v-model="dripConfig.mode" value="random" class="text-yellow-400">
+                                        <span class="text-yellow-300 font-bold">🎲 随机波动模式</span>
+                                    </label>
+                                </div>
+
+                                <div class="h-4 w-px bg-white/20 hidden sm:block"></div>
+
+                                <label class="flex items-center space-x-1.5 cursor-pointer text-emerald-300 font-bold">
+                                    <input type="checkbox" v-model="dripConfig.onlyDaytime" class="rounded text-emerald-500">
+                                    <span>☀️ 仅在白天 08:00 - 22:00 自动投放（夜间自动休眠）</span>
+                                </label>
+                            </div>
+
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                                <div>
-                                    <label class="block opacity-80 mb-1">每次发布数量 (条)</label>
+                                <!-- 固定模式下显示 -->
+                                <div v-if="dripConfig.mode !== 'random'">
+                                    <label class="block opacity-80 mb-1">每次固定发布数量 (条)</label>
                                     <input v-model.number="dripConfig.countPerBatch" type="number" min="1" class="w-full bg-white/10 border border-white/20 rounded p-2 text-white font-bold outline-none">
                                 </div>
+
+                                <!-- 随机模式下显示最小/最大范围 -->
+                                <div v-else class="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label class="block opacity-80 mb-1">最小条数</label>
+                                        <input v-model.number="dripConfig.minCountPerBatch" type="number" min="1" class="w-full bg-white/10 border border-white/20 rounded p-2 text-yellow-300 font-bold outline-none">
+                                    </div>
+                                    <div>
+                                        <label class="block opacity-80 mb-1">最大条数</label>
+                                        <input v-model.number="dripConfig.maxCountPerBatch" type="number" min="1" class="w-full bg-white/10 border border-white/20 rounded p-2 text-yellow-300 font-bold outline-none">
+                                    </div>
+                                </div>
+
                                 <div>
                                     <label class="block opacity-80 mb-1">发布间隔时间 (秒)</label>
                                     <input v-model.number="dripConfig.intervalSeconds" type="number" min="2" class="w-full bg-white/10 border border-white/20 rounded p-2 text-white font-bold outline-none">
                                 </div>
+
                                 <div class="flex items-end space-x-2">
                                     <button @click="saveDripConfig" class="bg-yellow-500 hover:bg-yellow-600 text-slate-900 font-bold px-4 py-2 rounded shadow transition flex-1">保存频率设置</button>
                                     <button @click="toggleDripEnabled" :class="dripConfig.enabled ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'" class="text-white font-bold px-3 py-2 rounded shadow transition">
@@ -306,7 +344,7 @@
 
                             <div v-if="queueCount > 0" class="mt-4 pt-3 border-t border-white/10 flex justify-between items-center text-xs flex-wrap gap-2">
                                 <span class="text-slate-300">
-                                    💡 预计还需 <b>{{ Math.ceil((queueCount / (dripConfig.countPerBatch||1)) * (dripConfig.intervalSeconds||60) / 60) }}</b> 分钟全部发布完毕。
+                                    💡 模式：<b>{{ dripConfig.mode === 'random' ? `随机 ${dripConfig.minCountPerBatch||1}~${dripConfig.maxCountPerBatch||5} 条` : `固定 ${dripConfig.countPerBatch||5} 条` }}</b> · 间隔：<b>{{ dripConfig.intervalSeconds||60 }} 秒</b> · 限时：<b>{{ dripConfig.onlyDaytime ? '仅白天08:00~22:00' : '全天24小时' }}</b>
                                 </span>
                                 <div class="flex space-x-2">
                                     <button @click="controlQueue('release_all')" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded font-bold">立即全部一键释放</button>
@@ -469,7 +507,7 @@
                     importMode: 'drip',
                     queueCount: 0,
                     archivedCount: 0,
-                    dripConfig: { enabled: true, countPerBatch: 5, intervalSeconds: 60 },
+                    dripConfig: { enabled: true, mode: 'fixed', countPerBatch: 5, minCountPerBatch: 2, maxCountPerBatch: 6, intervalSeconds: 60, onlyDaytime: true },
 
                     sourceList: [
                         { name: 'GR-抖音投放', price: 55 }, { name: 'GR-百度推广', price: 35 }, { name: 'GR-抖音信息流', price: 85 },
@@ -602,7 +640,9 @@
 
                 saveDripConfig() {
                     socket.emit('update-drip-config', this.dripConfig, () => {
-                        Swal.fire('保存成功', `已调整为：每隔 ${this.dripConfig.intervalSeconds} 秒自动投放 ${this.dripConfig.countPerBatch} 条线索！`, 'success');
+                        const modeText = this.dripConfig.mode === 'random' ? `【随机模式】每隔 ${this.dripConfig.intervalSeconds} 秒随机投放 ${this.dripConfig.minCountPerBatch}~${this.dripConfig.maxCountPerBatch} 条线索` : `【固定模式】每隔 ${this.dripConfig.intervalSeconds} 秒投放 ${this.dripConfig.countPerBatch} 条线索`;
+                        const dayText = this.dripConfig.onlyDaytime ? '（仅白天08:00~22:00投放）' : '（全天24小时投放）';
+                        Swal.fire('保存成功', `已调整为：${modeText}${dayText}！`, 'success');
                     });
                 },
 
@@ -771,7 +811,6 @@
                     });
                 },
 
-                // 修复导出已提取线索为 Excel
                 exportMyLeads() {
                     if (!this.myUnlockedLeads || this.myUnlockedLeads.length === 0) {
                         return Swal.fire('提示', '暂无已提取的线索可供导出！', 'info');
