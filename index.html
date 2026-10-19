@@ -216,9 +216,7 @@
                         <button @click="adminSubTab = 'history'" :class="adminSubTab === 'history' ? 'bg-blue-600 text-white font-bold' : 'bg-white text-slate-600'" class="px-4 py-2 rounded-lg text-sm flex items-center"><i class="fa-solid fa-receipt mr-1.5"></i>全员提取流水</button>
                     </div>
 
-                    <!-- 数据 ROI 评估与大盘看板 -->
                     <div v-if="adminSubTab === 'analytics'" class="space-y-6">
-                        <!-- 核心指标卡片 -->
                         <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                             <div class="bg-white p-5 rounded-xl border tech-card">
                                 <div class="text-xs text-slate-500 font-bold mb-1">系统累计总流水收益</div>
@@ -238,7 +236,6 @@
                             </div>
                         </div>
 
-                        <!-- 渠道 ROI 分析表格 -->
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div class="bg-white p-5 rounded-xl border tech-card">
                                 <h4 class="font-bold text-slate-800 mb-4 flex items-center"><i class="fa-solid fa-sack-dollar text-yellow-500 mr-2"></i>渠道线索销售 ROI 排行榜</h4>
@@ -279,7 +276,6 @@
                     </div>
 
                     <div v-if="adminSubTab === 'import'" class="space-y-6">
-                        <!-- 匀速滴灌/仿真实时入库控制器 -->
                         <div class="bg-gradient-to-r from-indigo-900 to-blue-900 text-white rounded-xl p-5 shadow-md">
                             <div class="flex justify-between items-center flex-wrap gap-3 mb-3 border-b border-white/10 pb-3">
                                 <div class="flex items-center space-x-2">
@@ -411,7 +407,7 @@
                                         <td class="p-3 font-bold text-blue-600">{{ log.username }}</td>
                                         <td class="p-3 font-bold">{{ log.lead_name || '无' }}</td>
                                         <td class="p-3 font-mono-tech text-emerald-600 font-bold">{{ log.phone }}</td>
-                                        <td class="p-3 font-bold text-red-500 font-mono-tech">¥{{ log.price }}</td>
+                                        <td class="p-3 text-red-500 font-bold font-mono-tech">¥{{ log.price }}</td>
                                         <td class="p-3 text-xs text-slate-400 font-mono-tech">{{ log.time }}</td>
                                     </tr>
                                 </tbody>
@@ -560,7 +556,6 @@
                 if (this.isLoggedIn) this.fetchAllData();
                 socket.on('realtime-db-update', () => this.fetchAllData());
                 
-                // 账号抢占被挤下线监听
                 socket.on('force-logout', (msg) => {
                     Swal.fire('被迫下线', msg, 'warning').then(() => {
                         this.logout();
@@ -775,10 +770,27 @@
                         if (r.isConfirmed) socket.emit('update-user-field', { userId: user.id, updateData: { balance: (user.balance||0) + Number(r.value) } });
                     });
                 },
+
+                // 修复导出已提取线索为 Excel
                 exportMyLeads() {
-                    const data = this.myUnlockedLeads.map(l => ({ '姓名': l.name, '明文电话': l.phone, '地区': l.region, '来源': l.source, '单价': l.price, '录入时间': l.create_time }));
-                    XLSX.writeFile(XLSX.utils.book_new(), '已提取线索_' + new Date().toLocaleDateString() + '.xlsx');
+                    if (!this.myUnlockedLeads || this.myUnlockedLeads.length === 0) {
+                        return Swal.fire('提示', '暂无已提取的线索可供导出！', 'info');
+                    }
+                    const data = this.myUnlockedLeads.map(l => ({ 
+                        '姓名': l.name, 
+                        '明文电话': l.phone, 
+                        '地区': l.region, 
+                        '来源': l.source, 
+                        '单价': l.price, 
+                        '录入时间': l.create_time 
+                    }));
+                    
+                    const worksheet = XLSX.utils.json_to_sheet(data);
+                    const workbook = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(workbook, worksheet, "已提取线索");
+                    XLSX.writeFile(workbook, '已提取线索_' + new Date().toLocaleDateString().replace(/\//g, '-') + '.xlsx');
                 },
+
                 resetFilters() { this.filters = { region: '', phoneTail: '', source: '' }; },
                 toggleSelectAll(e) {
                     if (e.target.checked) this.selectedLeadIds = this.pagedLeads.map(l => l.id);
