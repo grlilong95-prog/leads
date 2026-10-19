@@ -276,7 +276,6 @@
                     </div>
 
                     <div v-if="adminSubTab === 'import'" class="space-y-6">
-                        <!-- 支持随机/固定、白天限制的滴灌引擎控制器 -->
                         <div class="bg-gradient-to-r from-indigo-900 to-blue-900 text-white rounded-xl p-5 shadow-md">
                             <div class="flex justify-between items-center flex-wrap gap-3 mb-3 border-b border-white/10 pb-3">
                                 <div class="flex items-center space-x-2">
@@ -288,7 +287,6 @@
                                 </div>
                             </div>
 
-                            <!-- 模式与白天限制选择器 -->
                             <div class="mb-4 flex flex-wrap items-center gap-4 text-xs bg-white/10 p-2.5 rounded-lg">
                                 <div class="flex items-center space-x-3">
                                     <span class="font-bold opacity-90">投放模式：</span>
@@ -311,13 +309,11 @@
                             </div>
 
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                                <!-- 固定模式下显示 -->
                                 <div v-if="dripConfig.mode !== 'random'">
                                     <label class="block opacity-80 mb-1">每次固定发布数量 (条)</label>
                                     <input v-model.number="dripConfig.countPerBatch" type="number" min="1" class="w-full bg-white/10 border border-white/20 rounded p-2 text-white font-bold outline-none">
                                 </div>
 
-                                <!-- 随机模式下显示最小/最大范围 -->
                                 <div v-else class="grid grid-cols-2 gap-2">
                                     <div>
                                         <label class="block opacity-80 mb-1">最小条数</label>
@@ -581,11 +577,24 @@
                     const selectable = this.pagedLeads.filter(l => this.currentUser?.role === 'admin' || !this.isUnlocked(l.id));
                     return selectable.length > 0 && selectable.every(l => this.selectedLeadIds.includes(l.id));
                 },
+                // 核心修复点：基于全量购买流水导出已购线索，永久不漏、永久不丢
                 myUnlockedLeads() {
                     if (!this.currentUser) return [];
                     const curUser = String(this.currentUser.username || '').trim();
-                    const unlockedSet = new Set(this.purchaseLogs.filter(l => String(l.username || '').trim() === curUser).map(l => String(l.lead_id)));
-                    return this.leads.filter(lead => unlockedSet.has(String(lead.id)));
+                    const myLogs = (this.purchaseLogs || []).filter(l => String(l.username || '').trim() === curUser);
+                    
+                    return myLogs.map(log => {
+                        const matchedLead = (this.leads || []).find(l => String(l.id) === String(log.lead_id));
+                        return {
+                            id: log.lead_id,
+                            name: log.lead_name || matchedLead?.name || '客户',
+                            phone: log.phone || matchedLead?.phone || '',
+                            region: matchedLead?.region || '无',
+                            source: log.source || matchedLead?.source || '无',
+                            price: log.price,
+                            create_time: log.time || matchedLead?.create_time || ''
+                        };
+                    });
                 }
             },
             watch: { filters: { deep: true, handler() { this.currentPage = 1; } } },
@@ -750,7 +759,8 @@
                     reader.onload = (evt) => {
                         const data = new Uint8Array(evt.target.result);
                         const workbook = XLSX.read(data, { type: 'array' });
-                        const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+                        // 核心改进：开启 raw: false 防止单元格被读成科学计数法
+                        const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { raw: false });
                         let insertList = [];
 
                         json.forEach(row => {
@@ -807,7 +817,12 @@
                 updateUserPerm(user) { socket.emit('update-user-field', { userId: user.id, updateData: { can_access: user.can_access, can_extract: user.can_extract } }); },
                 adminRechargeUser(user) {
                     Swal.fire({ title: '变动余额', input: 'number', showCancelButton: true }).then((r) => {
-                        if (r.isConfirmed) socket.emit('update-user-field', { userId: user.id, updateData: { balance: (user.balance||0) + Number(r.value) } });
+                        if (r.isConfirmed) {
+                            const val = Number(r.value);
+                            if (!isNaN(val)) {
+                                socket.emit('update-user-field', { userId: user.id, updateData: { balance: (user.balance||0) + val } });
+                            }
+                        }
                     });
                 },
 
