@@ -31,12 +31,15 @@ function getChinaTimeString(dateObj = new Date()) {
     return dateObj.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 }
 
-const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/loan_leads_db?retryWrites=true&w=majority';
+// 重新连接到你最开始存放数据的真实文件夹
+const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/?retryWrites=true&w=majority';
 
-// 优化 Mongoose 连接配置
-mongoose.set('bufferCommands', false); // 掉线时不死等缓冲
+mongoose.set('bufferCommands', false);
 mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 5000 })
-    .then(() => console.log('✅ 成功连接云端数据库！'))
+    .then(() => {
+        console.log('✅ 成功连接云端数据库！');
+        migrateOldData(); // 启动时自动检查并恢复旧数据
+    })
     .catch(err => console.error('❌ 数据库连接暂时失败:', err));
 
 const UserSchema = new mongoose.Schema({
@@ -68,7 +71,8 @@ const ConfigSchema = new mongoose.Schema({
         intervalSeconds: { type: Number, default: 60 },
         onlyDaytime: { type: Boolean, default: true },
         lastDripTimestamp: { type: Number, default: 0 }
-    }
+    },
+    importQueue: Array // 兼容旧版排队数据
 });
 const LogSchema = new mongoose.Schema({
     id: String, username: String, lead_id: String, lead_name: String,
@@ -80,6 +84,42 @@ const Lead = mongoose.model('Lead', LeadSchema);
 const QueueItem = mongoose.model('QueueItem', QueueSchema);
 const Config = mongoose.model('Config', ConfigSchema);
 const PurchaseLog = mongoose.model('PurchaseLog', LogSchema);
+
+// 核心恢复函数：自动把旧格式里的上万条排队数据迁移到新表中，绝不丢失！
+async function migrateOldData() {
+    try {
+        const config = await Config.findOne({ key: 'main' });
+        if (config && config.importQueue && config.importQueue.length > 0) {
+            console.log(`检测到旧队列中有 ${config.importQueue.length} 条数据，正在自动恢复转移...`);
+            const oldQueue = config.importQueue;
+            const docsToInsert = oldQueue.map(item => ({
+                id: item.id || ('lead_' + Date.now() + '_' + Math.floor(Math.random() * 10000)),
+                name: item.name || '无',
+                gender: item.gender || '无',
+                phone: item.phone,
+                region: item.region || '无',
+                source: item.source || '批量导入',
+                price: Number(item.price) || 20,
+                originalPrice: Number(item.price) || 20
+            }));
+
+            // 分批导入新表，防止超内存
+            const batchSize = 1000;
+            for (let i = 0; i < docsToInsert.length; i += batchSize) {
+                const chunk = docsToInsert.slice(i, i + batchSize);
+                await QueueItem.insertMany(chunk);
+            }
+
+            // 清空旧的大数组，释放内存
+            config.importQueue = [];
+            await config.save();
+            console.log('✅ 数据已完美恢复并搬迁完毕！');
+            io.emit('realtime-db-update');
+        }
+    } catch (e) {
+        console.error('自动恢复旧数据时出错:', e);
+    }
+}
 
 async function initDB() {
     try {
@@ -98,7 +138,8 @@ async function initDB() {
                     enabled: true, mode: 'fixed', countPerBatch: 5,
                     minCountPerBatch: 2, maxCountPerBatch: 6,
                     intervalSeconds: 60, onlyDaytime: true, lastDripTimestamp: 0
-                }
+                },
+                importQueue: []
             });
         }
     } catch (e) {}
@@ -107,7 +148,7 @@ setTimeout(initDB, 3000);
 
 const activeUserSockets = new Map();
 
-// ==================== 1. 超轻量滴灌引擎 (绝不扫大表，极为省内存) ====================
+// 滴灌引擎
 let isDripRunning = false;
 async function runDripLoop() {
     if (isDripRunning) return;
@@ -169,15 +210,15 @@ async function runDripLoop() {
             }
         }
     } catch (err) {
-        console.error('滴灌执行小异常:', err);
+        console.error('滴灌执行异常:', err);
     } finally {
         isDripRunning = false;
-        setTimeout(runDripLoop, 5000); // 5秒平滑无感轮询
+        setTimeout(runDripLoop, 5000);
     }
 }
 runDripLoop();
 
-// ==================== 2. 定时降价/归档引擎 (每 10 分钟跑一次，绝对不压内存) ====================
+// 降价引擎
 async function runAgingJob() {
     try {
         if (mongoose.connection.readyState !== 1) return;
@@ -188,14 +229,12 @@ async function runAgingJob() {
 
         let needEmit = false;
 
-        // 超 7 天未提取 -> 批量高效归档
         const archiveRes = await Lead.updateMany(
             { isArchived: false, timestamp: { $lt: now - D7 } },
             { $set: { isArchived: true } }
         );
         if (archiveRes.modifiedCount > 0) needEmit = true;
 
-        // 超 48 小时 -> 5 折
         const discount50Leads = await Lead.find({ isArchived: false, isDiscount50: { $ne: true }, timestamp: { $lt: now - H48 } });
         for (let lead of discount50Leads) {
             lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.5));
@@ -205,7 +244,6 @@ async function runAgingJob() {
             needEmit = true;
         }
 
-        // 超 24 小时 -> 8 折
         const discount20Leads = await Lead.find({ isArchived: false, isDiscount50: { $ne: true }, isDiscount20: { $ne: true }, timestamp: { $lt: now - H24 } });
         for (let lead of discount20Leads) {
             lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.8));
@@ -218,10 +256,10 @@ async function runAgingJob() {
             io.emit('realtime-db-update');
         }
     } catch (e) {
-        console.error('降价引擎小异常:', e);
+        console.error('降价引擎异常:', e);
     }
 }
-setInterval(runAgingJob, 10 * 60 * 1000); // 10分钟只跑一次
+setInterval(runAgingJob, 10 * 60 * 1000);
 
 // Socket 交互
 io.on('connection', (socket) => {
@@ -305,6 +343,7 @@ io.on('connection', (socket) => {
         try {
             if (action === 'clear') {
                 await QueueItem.deleteMany({});
+                await Config.updateOne({ key: 'main' }, { $set: { importQueue: [] } });
             } else if (action === 'release_all') {
                 const queueItems = await QueueItem.find({}).lean();
                 const now = Date.now();
@@ -318,6 +357,7 @@ io.on('connection', (socket) => {
                     await Lead.insertMany(docsToInsert);
                 }
                 await QueueItem.deleteMany({});
+                await Config.updateOne({ key: 'main' }, { $set: { importQueue: [] } });
             }
             io.emit('realtime-db-update');
             if (callback) callback({ success: true });
