@@ -7,13 +7,9 @@ const path = require('path');
 const fs = require('fs');
 const mongoose = require('mongoose');
 
-// ==================== 0. 全局防崩溃安全帽 (绝对防止 Bad Gateway/坏门) ====================
-process.on('uncaughtException', (err) => {
-    console.error('【捕获到全局报错，程序已自动恢复，防关机】:', err);
-});
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('【捕获到未处理的异步报错，程序已自动恢复，防关机】:', reason);
-});
+// 全局防崩溃护航
+process.on('uncaughtException', (err) => console.error('【捕获未处理异常】:', err));
+process.on('unhandledRejection', (reason) => console.error('【捕获未处理拒绝】:', reason));
 
 const app = express();
 const server = http.createServer(app);
@@ -31,17 +27,17 @@ app.get('/', (req, res) => {
     }
 });
 
-// 北京时间格式化
 function getChinaTimeString(dateObj = new Date()) {
     return dateObj.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 }
 
-// 固定的云端数据库存储位置
 const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/loan_leads_db?retryWrites=true&w=majority';
 
+// 优化 Mongoose 连接配置
+mongoose.set('bufferCommands', false); // 掉线时不死等缓冲
 mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 5000 })
-    .then(() => console.log('✅ 成功连接云端数据库，数据已实现永久持久化！'))
-    .catch(err => console.error('❌ 数据库连接暂时失败（程序依然保持运行）:', err));
+    .then(() => console.log('✅ 成功连接云端数据库！'))
+    .catch(err => console.error('❌ 数据库连接暂时失败:', err));
 
 const UserSchema = new mongoose.Schema({
     id: String, username: String, password: String, role: String,
@@ -52,10 +48,15 @@ const LeadSchema = new mongoose.Schema({
     source: String, price: Number, originalPrice: Number, create_time: String, timestamp: Number,
     isDiscount20: Boolean, isDiscount50: Boolean, isArchived: { type: Boolean, default: false }
 });
+LeadSchema.index({ phone: 1 });
+LeadSchema.index({ isArchived: 1, timestamp: -1 });
+
 const QueueSchema = new mongoose.Schema({
     id: String, name: String, gender: String, phone: String, region: String,
     source: String, price: Number, originalPrice: Number
 });
+QueueSchema.index({ phone: 1 });
+
 const ConfigSchema = new mongoose.Schema({
     key: { type: String, default: 'main' },
     dripConfig: {
@@ -80,17 +81,16 @@ const QueueItem = mongoose.model('QueueItem', QueueSchema);
 const Config = mongoose.model('Config', ConfigSchema);
 const PurchaseLog = mongoose.model('PurchaseLog', LogSchema);
 
-// 初始化账号与配置
 async function initDB() {
     try {
         if (mongoose.connection.readyState !== 1) return;
-        const adminExists = await User.findOne({ username: 'admin' });
+        const adminExists = await User.findOne({ username: 'admin' }).lean();
         if (!adminExists) {
             await User.create({
                 id: 'u_admin', username: 'admin', password: 'admin888', role: 'admin', balance: 999999, can_access: true, can_extract: true, status: 'normal'
             });
         }
-        const configExists = await Config.findOne({ key: 'main' });
+        const configExists = await Config.findOne({ key: 'main' }).lean();
         if (!configExists) {
             await Config.create({
                 key: 'main',
@@ -101,62 +101,50 @@ async function initDB() {
                 }
             });
         }
-    } catch (e) {
-        console.error('初始化配置异常:', e);
-    }
+    } catch (e) {}
 }
 setTimeout(initDB, 3000);
 
 const activeUserSockets = new Map();
 
-// 核心滴灌调度引擎
-let dripTimer = null;
+// ==================== 1. 超轻量滴灌引擎 (绝不扫大表，极为省内存) ====================
+let isDripRunning = false;
+async function runDripLoop() {
+    if (isDripRunning) return;
+    isDripRunning = true;
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const config = await Config.findOne({ key: 'main' }).lean();
+            if (config && config.dripConfig && config.dripConfig.enabled) {
+                const queueCount = await QueueItem.countDocuments({});
+                if (queueCount > 0) {
+                    const now = Date.now();
+                    const intervalMs = (config.dripConfig.intervalSeconds || 60) * 1000;
+                    const lastTime = config.dripConfig.lastDripTimestamp || 0;
 
-async function startSchedulerEngine() {
-    if (dripTimer) clearInterval(dripTimer);
-
-    dripTimer = setInterval(async () => {
-        try {
-            if (mongoose.connection.readyState !== 1) return; // 数据库未准备好时跳过，防报错
-
-            let needUpdate = false;
-            const config = await Config.findOne({ key: 'main' });
-            if (!config) return;
-
-            const now = Date.now();
-            const queueCount = await QueueItem.countDocuments({});
-
-            // A. 滴灌投放引擎
-            if (config.dripConfig.enabled && queueCount > 0) {
-                const intervalMs = (config.dripConfig.intervalSeconds || 60) * 1000;
-                const lastTime = config.dripConfig.lastDripTimestamp || 0;
-
-                if (now - lastTime >= intervalMs) {
-
-                    let canRelease = true;
-                    if (config.dripConfig.onlyDaytime !== false) {
-                        const currentHour = parseInt(new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }));
-                        if (currentHour < 8 || currentHour >= 22) {
-                            canRelease = false; 
-                        }
-                    }
-
-                    if (canRelease) {
-                        let releaseCount = config.dripConfig.countPerBatch || 5;
-
-                        if (config.dripConfig.mode === 'random') {
-                            const min = Number(config.dripConfig.minCountPerBatch) || 1;
-                            const max = Math.max(min, Number(config.dripConfig.maxCountPerBatch) || 5);
-                            releaseCount = Math.floor(Math.random() * (max - min + 1)) + min;
+                    if (now - lastTime >= intervalMs) {
+                        let canRelease = true;
+                        if (config.dripConfig.onlyDaytime !== false) {
+                            const currentHour = parseInt(new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }));
+                            if (currentHour < 8 || currentHour >= 22) {
+                                canRelease = false;
+                            }
                         }
 
-                        const batch = await QueueItem.find({}).limit(releaseCount);
-                        if (batch.length > 0) {
-                            const nowStr = getChinaTimeString(new Date(now));
-                            const idsToRemove = batch.map(b => b._id);
+                        if (canRelease) {
+                            let releaseCount = config.dripConfig.countPerBatch || 5;
+                            if (config.dripConfig.mode === 'random') {
+                                const min = Number(config.dripConfig.minCountPerBatch) || 1;
+                                const max = Math.max(min, Number(config.dripConfig.maxCountPerBatch) || 5);
+                                releaseCount = Math.floor(Math.random() * (max - min + 1)) + min;
+                            }
 
-                            for (let item of batch) {
-                                await Lead.create({
+                            const batch = await QueueItem.find({}).limit(releaseCount).lean();
+                            if (batch.length > 0) {
+                                const nowStr = getChinaTimeString(new Date(now));
+                                const idsToRemove = batch.map(b => b._id);
+
+                                const docsToInsert = batch.map(item => ({
                                     id: item.id,
                                     name: item.name,
                                     gender: item.gender,
@@ -167,62 +155,80 @@ async function startSchedulerEngine() {
                                     originalPrice: item.price,
                                     create_time: nowStr,
                                     timestamp: now
-                                });
+                                }));
+
+                                await Lead.insertMany(docsToInsert);
+                                await QueueItem.deleteMany({ _id: { $in: idsToRemove } });
+
+                                await Config.updateOne({ key: 'main' }, { $set: { 'dripConfig.lastDripTimestamp': now } });
+                                io.emit('realtime-db-update');
                             }
-
-                            await QueueItem.deleteMany({ _id: { $in: idsToRemove } });
-
-                            config.dripConfig.lastDripTimestamp = now;
-                            await config.save();
-                            needUpdate = true;
                         }
                     }
                 }
             }
-
-            // B. 线索自动降价与冷库归档
-            const H24 = 24 * 3600 * 1000;
-            const H48 = 48 * 3600 * 1000;
-            const D7 = 7 * 24 * 3600 * 1000;
-
-            const activeLeads = await Lead.find({ isArchived: false });
-            for (let lead of activeLeads) {
-                const age = now - (lead.timestamp || now);
-
-                if (age > D7) {
-                    lead.isArchived = true;
-                    await lead.save();
-                    needUpdate = true;
-                } else if (age > H48 && !lead.isDiscount50) {
-                    lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.5));
-                    lead.isDiscount50 = true;
-                    lead.isDiscount20 = true;
-                    await lead.save();
-                    needUpdate = true;
-                } else if (age > H24 && !lead.isDiscount20) {
-                    lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.8));
-                    lead.isDiscount20 = true;
-                    await lead.save();
-                    needUpdate = true;
-                }
-            }
-
-            if (needUpdate) {
-                io.emit('realtime-db-update');
-            }
-        } catch (err) {
-            console.error('滴灌执行捕获到小异常 (已自动忽略防崩):', err);
         }
-    }, 3000);
+    } catch (err) {
+        console.error('滴灌执行小异常:', err);
+    } finally {
+        isDripRunning = false;
+        setTimeout(runDripLoop, 5000); // 5秒平滑无感轮询
+    }
 }
+runDripLoop();
 
-startSchedulerEngine();
+// ==================== 2. 定时降价/归档引擎 (每 10 分钟跑一次，绝对不压内存) ====================
+async function runAgingJob() {
+    try {
+        if (mongoose.connection.readyState !== 1) return;
+        const now = Date.now();
+        const H24 = 24 * 3600 * 1000;
+        const H48 = 48 * 3600 * 1000;
+        const D7 = 7 * 24 * 3600 * 1000;
 
+        let needEmit = false;
+
+        // 超 7 天未提取 -> 批量高效归档
+        const archiveRes = await Lead.updateMany(
+            { isArchived: false, timestamp: { $lt: now - D7 } },
+            { $set: { isArchived: true } }
+        );
+        if (archiveRes.modifiedCount > 0) needEmit = true;
+
+        // 超 48 小时 -> 5 折
+        const discount50Leads = await Lead.find({ isArchived: false, isDiscount50: { $ne: true }, timestamp: { $lt: now - H48 } });
+        for (let lead of discount50Leads) {
+            lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.5));
+            lead.isDiscount50 = true;
+            lead.isDiscount20 = true;
+            await lead.save();
+            needEmit = true;
+        }
+
+        // 超 24 小时 -> 8 折
+        const discount20Leads = await Lead.find({ isArchived: false, isDiscount50: { $ne: true }, isDiscount20: { $ne: true }, timestamp: { $lt: now - H24 } });
+        for (let lead of discount20Leads) {
+            lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.8));
+            lead.isDiscount20 = true;
+            await lead.save();
+            needEmit = true;
+        }
+
+        if (needEmit) {
+            io.emit('realtime-db-update');
+        }
+    } catch (e) {
+        console.error('降价引擎小异常:', e);
+    }
+}
+setInterval(runAgingJob, 10 * 60 * 1000); // 10分钟只跑一次
+
+// Socket 交互
 io.on('connection', (socket) => {
 
     socket.on('login', async ({ username, password }, callback) => {
         try {
-            const user = await User.findOne({ username, password });
+            const user = await User.findOne({ username, password }).lean();
             if (!user) return callback({ success: false, message: '账号或密码错误！' });
             if (!user.can_access || user.status === 'banned') {
                 return callback({ success: false, message: '账号已被禁用！' });
@@ -245,8 +251,12 @@ io.on('connection', (socket) => {
 
     socket.on('fetch-all-data', async (callback) => {
         try {
-            const users = await User.find({}) || [];
-            const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }) || [];
+            if (mongoose.connection.readyState !== 1) {
+                return callback({ users: [], leads: [], archivedCount: 0, purchaseLogs: [], queueCount: 0, dripConfig: {} });
+            }
+
+            const users = await User.find({}).lean() || [];
+            const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }).lean() || [];
 
             const purchasedLeadIds = purchaseLogs.map(l => String(l.lead_id));
             const leads = await Lead.find({
@@ -254,11 +264,11 @@ io.on('connection', (socket) => {
                     { isArchived: false },
                     { id: { $in: purchasedLeadIds } }
                 ]
-            }).sort({ timestamp: -1 }) || [];
+            }).sort({ timestamp: -1 }).lean() || [];
 
             const archivedCount = await Lead.countDocuments({ isArchived: true }) || 0;
             const queueCount = await QueueItem.countDocuments({}) || 0;
-            const config = await Config.findOne({ key: 'main' });
+            const config = await Config.findOne({ key: 'main' }).lean();
 
             const defaultDrip = {
                 enabled: true, mode: 'fixed', countPerBatch: 5,
@@ -296,15 +306,16 @@ io.on('connection', (socket) => {
             if (action === 'clear') {
                 await QueueItem.deleteMany({});
             } else if (action === 'release_all') {
-                const queueItems = await QueueItem.find({});
+                const queueItems = await QueueItem.find({}).lean();
                 const now = Date.now();
                 const nowStr = getChinaTimeString(new Date(now));
-                for (let lead of queueItems) {
-                    await Lead.create({
-                        id: lead.id, name: lead.name, gender: lead.gender, phone: lead.phone,
-                        region: lead.region, source: lead.source, price: lead.price, originalPrice: lead.price,
-                        create_time: nowStr, timestamp: now
-                    });
+                const docsToInsert = queueItems.map(lead => ({
+                    id: lead.id, name: lead.name, gender: lead.gender, phone: lead.phone,
+                    region: lead.region, source: lead.source, price: lead.price, originalPrice: lead.price,
+                    create_time: nowStr, timestamp: now
+                }));
+                if (docsToInsert.length > 0) {
+                    await Lead.insertMany(docsToInsert);
                 }
                 await QueueItem.deleteMany({});
             }
@@ -316,8 +327,8 @@ io.on('connection', (socket) => {
     socket.on('add-manual-lead', async (leadData, callback) => {
         try {
             const cleanPhone = String(leadData.phone || '').trim();
-            const existInLeads = await Lead.findOne({ phone: cleanPhone });
-            const existInQueue = await QueueItem.findOne({ phone: cleanPhone });
+            const existInLeads = await Lead.findOne({ phone: cleanPhone }).lean();
+            const existInQueue = await QueueItem.findOne({ phone: cleanPhone }).lean();
 
             if (existInLeads || existInQueue) {
                 return callback({ success: false, message: `手机号 ${cleanPhone} 已存在！` });
@@ -350,10 +361,13 @@ io.on('connection', (socket) => {
             const now = Date.now();
             const chinaTime = getChinaTimeString(new Date(now));
 
+            const queueDocs = [];
+            const leadDocs = [];
+
             for (let item of insertList) {
                 const cleanPhone = String(item.phone || '').trim();
-                const existInDb = await Lead.findOne({ phone: cleanPhone });
-                const existInQueue = await QueueItem.findOne({ phone: cleanPhone });
+                const existInDb = await Lead.findOne({ phone: cleanPhone }).lean();
+                const existInQueue = await QueueItem.findOne({ phone: cleanPhone }).lean();
 
                 if (existInDb || existInQueue) {
                     dup++;
@@ -372,13 +386,16 @@ io.on('connection', (socket) => {
                     };
 
                     if (mode === 'drip') {
-                        await QueueItem.create(leadObj);
+                        queueDocs.push(leadObj);
                     } else {
-                        await Lead.create(leadObj);
+                        leadDocs.push(leadObj);
                     }
                     added++;
                 }
             }
+
+            if (queueDocs.length > 0) await QueueItem.insertMany(queueDocs);
+            if (leadDocs.length > 0) await Lead.insertMany(leadDocs);
 
             io.emit('realtime-db-update');
             callback({ success: true, addedCount: added, duplicateCount: dup, mode });
@@ -404,18 +421,17 @@ io.on('connection', (socket) => {
             }
 
             const nowStr = getChinaTimeString();
-            for (let lead of targetLeads) {
-                await PurchaseLog.create({
-                    id: 'log_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
-                    username: user.username,
-                    lead_id: String(lead.id),
-                    lead_name: lead.name,
-                    phone: lead.phone,
-                    price: lead.price,
-                    source: lead.source,
-                    time: nowStr
-                });
-            }
+            const logDocs = targetLeads.map(lead => ({
+                id: 'log_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                username: user.username,
+                lead_id: String(lead.id),
+                lead_name: lead.name,
+                phone: lead.phone,
+                price: lead.price,
+                source: lead.source,
+                time: nowStr
+            }));
+            await PurchaseLog.insertMany(logDocs);
 
             io.emit('realtime-db-update');
             callback({ success: true, newBalance: user.balance });
@@ -434,7 +450,7 @@ io.on('connection', (socket) => {
 
     socket.on('create-user', async ({ username, password, balance }, callback) => {
         try {
-            const exist = await User.findOne({ username });
+            const exist = await User.findOne({ username }).lean();
             if (exist) {
                 return callback({ success: false, message: '用户名已存在！' });
             }
