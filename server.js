@@ -46,7 +46,16 @@ const LeadSchema = new mongoose.Schema({
 });
 const ConfigSchema = new mongoose.Schema({
     key: { type: String, default: 'main' },
-    dripConfig: { enabled: Boolean, countPerBatch: Number, intervalSeconds: Number },
+    dripConfig: {
+        enabled: Boolean,
+        mode: { type: String, default: 'fixed' },
+        countPerBatch: { type: Number, default: 5 },
+        minCountPerBatch: { type: Number, default: 2 },
+        maxCountPerBatch: { type: Number, default: 6 },
+        intervalSeconds: { type: Number, default: 60 },
+        onlyDaytime: { type: Boolean, default: true },
+        lastDripTimestamp: { type: Number, default: 0 }
+    },
     importQueue: Array
 });
 const LogSchema = new mongoose.Schema({
@@ -72,7 +81,11 @@ async function initDB() {
         if (!configExists) {
             await Config.create({
                 key: 'main',
-                dripConfig: { enabled: true, countPerBatch: 5, intervalSeconds: 60 },
+                dripConfig: {
+                    enabled: true, mode: 'fixed', countPerBatch: 5,
+                    minCountPerBatch: 2, maxCountPerBatch: 6,
+                    intervalSeconds: 60, onlyDaytime: true, lastDripTimestamp: 0
+                },
                 importQueue: []
             });
         }
@@ -84,42 +97,74 @@ initDB();
 
 const activeUserSockets = new Map();
 
-// 定时滴灌与降价引擎
+// 核心调度引擎：完美控制时间间隔、白天限制、随机/固定条数
 let dripTimer = null;
 
 async function startSchedulerEngine() {
     if (dripTimer) clearInterval(dripTimer);
 
+    // 每 3 秒扫描一次条件是否触发
     dripTimer = setInterval(async () => {
         try {
             let needUpdate = false;
             const config = await Config.findOne({ key: 'main' });
             if (!config) return;
 
-            if (config.dripConfig.enabled && config.importQueue.length > 0) {
-                const count = Math.min(config.dripConfig.countPerBatch, config.importQueue.length);
-                const batch = config.importQueue.splice(0, count);
-                const now = Date.now();
-                const nowStr = getChinaTimeString(new Date(now));
+            const now = Date.now();
 
-                for (let lead of batch) {
-                    lead.create_time = nowStr;
-                    lead.timestamp = now;
-                    lead.originalPrice = lead.price;
-                    await Lead.create(lead);
+            // A. 滴灌投放引擎
+            if (config.dripConfig.enabled && config.importQueue.length > 0) {
+                const intervalMs = (config.dripConfig.intervalSeconds || 60) * 1000;
+                const lastTime = config.dripConfig.lastDripTimestamp || 0;
+
+                // 1. 检查是否达到了设定的时间间隔 (例如 163秒)
+                if (now - lastTime >= intervalMs) {
+
+                    // 2. 检查白天限制 (08:00 - 22:00 北京时间)
+                    let canRelease = true;
+                    if (config.dripConfig.onlyDaytime !== false) {
+                        const currentHour = parseInt(new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }));
+                        if (currentHour < 8 || currentHour >= 22) {
+                            canRelease = false; // 晚上22:00到早晨08:00暂停投放
+                        }
+                    }
+
+                    if (canRelease) {
+                        let releaseCount = config.dripConfig.countPerBatch || 5;
+
+                        // 随机模式下计算释放量
+                        if (config.dripConfig.mode === 'random') {
+                            const min = Number(config.dripConfig.minCountPerBatch) || 1;
+                            const max = Math.max(min, Number(config.dripConfig.maxCountPerBatch) || 5);
+                            releaseCount = Math.floor(Math.random() * (max - min + 1)) + min;
+                        }
+
+                        const count = Math.min(releaseCount, config.importQueue.length);
+                        const batch = config.importQueue.splice(0, count);
+                        const nowStr = getChinaTimeString(new Date(now));
+
+                        for (let lead of batch) {
+                            lead.create_time = nowStr;
+                            lead.timestamp = now;
+                            lead.originalPrice = lead.price;
+                            await Lead.create(lead);
+                        }
+
+                        config.dripConfig.lastDripTimestamp = now;
+                        await config.save();
+                        needUpdate = true;
+                    }
                 }
-                await config.save();
-                needUpdate = true;
             }
 
-            const now = Date.now();
+            // B. 线索自动降价与冷库归档
             const H24 = 24 * 3600 * 1000;
             const H48 = 48 * 3600 * 1000;
             const D7 = 7 * 24 * 3600 * 1000;
 
             const activeLeads = await Lead.find({ isArchived: false });
             for (let lead of activeLeads) {
-                const age = now - (lead.timestamp || new Date(lead.create_time).getTime() || now);
+                const age = now - (lead.timestamp || now);
 
                 if (age > D7) {
                     lead.isArchived = true;
@@ -143,9 +188,9 @@ async function startSchedulerEngine() {
                 io.emit('realtime-db-update');
             }
         } catch (err) {
-            console.error('调度引擎出错:', err);
+            console.error('调度引擎报错:', err);
         }
-    }, 10000);
+    }, 3000); // 3秒精准轮询
 }
 
 startSchedulerEngine();
@@ -173,10 +218,25 @@ io.on('connection', (socket) => {
 
     socket.on('fetch-all-data', async (callback) => {
         const users = await User.find({});
-        const leads = await Lead.find({ isArchived: false }).sort({ timestamp: -1 });
-        const archivedCount = await Lead.countDocuments({ isArchived: true });
         const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 });
+
+        // 重点修复：返回所有未归档线索 + 所有已被购买过的线索（保证用户买过的线索永远可见）
+        const purchasedLeadIds = purchaseLogs.map(l => String(l.lead_id));
+        const leads = await Lead.find({
+            $or: [
+                { isArchived: false },
+                { id: { $in: purchasedLeadIds } }
+            ]
+        }).sort({ timestamp: -1 });
+
+        const archivedCount = await Lead.countDocuments({ isArchived: true });
         const config = await Config.findOne({ key: 'main' });
+
+        const defaultDrip = {
+            enabled: true, mode: 'fixed', countPerBatch: 5,
+            minCountPerBatch: 2, maxCountPerBatch: 6,
+            intervalSeconds: 60, onlyDaytime: true, lastDripTimestamp: 0
+        };
 
         callback({
             users,
@@ -184,7 +244,7 @@ io.on('connection', (socket) => {
             archivedCount,
             purchaseLogs,
             queueCount: config ? config.importQueue.length : 0,
-            dripConfig: config ? config.dripConfig : { enabled: true, countPerBatch: 5, intervalSeconds: 60 }
+            dripConfig: config ? { ...defaultDrip, ...config.dripConfig } : defaultDrip
         });
     });
 
