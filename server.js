@@ -7,6 +7,14 @@ const path = require('path');
 const fs = require('fs');
 const mongoose = require('mongoose');
 
+// ==================== 0. 全局防崩溃安全帽 (绝对防止 Bad Gateway/坏门) ====================
+process.on('uncaughtException', (err) => {
+    console.error('【捕获到全局报错，程序已自动恢复，防关机】:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('【捕获到未处理的异步报错，程序已自动恢复，防关机】:', reason);
+});
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -28,12 +36,12 @@ function getChinaTimeString(dateObj = new Date()) {
     return dateObj.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 }
 
-// 直接连接你的云端数据库
-const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/?retryWrites=true&w=majority';
+// 固定的云端数据库存储位置
+const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/loan_leads_db?retryWrites=true&w=majority';
 
-mongoose.connect(MONGO_URI)
+mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 5000 })
     .then(() => console.log('✅ 成功连接云端数据库，数据已实现永久持久化！'))
-    .catch(err => console.error('❌ 数据库连接失败:', err));
+    .catch(err => console.error('❌ 数据库连接暂时失败（程序依然保持运行）:', err));
 
 const UserSchema = new mongoose.Schema({
     id: String, username: String, password: String, role: String,
@@ -43,6 +51,10 @@ const LeadSchema = new mongoose.Schema({
     id: String, name: String, gender: String, phone: String, region: String,
     source: String, price: Number, originalPrice: Number, create_time: String, timestamp: Number,
     isDiscount20: Boolean, isDiscount50: Boolean, isArchived: { type: Boolean, default: false }
+});
+const QueueSchema = new mongoose.Schema({
+    id: String, name: String, gender: String, phone: String, region: String,
+    source: String, price: Number, originalPrice: Number
 });
 const ConfigSchema = new mongoose.Schema({
     key: { type: String, default: 'main' },
@@ -55,8 +67,7 @@ const ConfigSchema = new mongoose.Schema({
         intervalSeconds: { type: Number, default: 60 },
         onlyDaytime: { type: Boolean, default: true },
         lastDripTimestamp: { type: Number, default: 0 }
-    },
-    importQueue: Array
+    }
 });
 const LogSchema = new mongoose.Schema({
     id: String, username: String, lead_id: String, lead_name: String,
@@ -65,12 +76,14 @@ const LogSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', UserSchema);
 const Lead = mongoose.model('Lead', LeadSchema);
+const QueueItem = mongoose.model('QueueItem', QueueSchema);
 const Config = mongoose.model('Config', ConfigSchema);
 const PurchaseLog = mongoose.model('PurchaseLog', LogSchema);
 
 // 初始化账号与配置
 async function initDB() {
     try {
+        if (mongoose.connection.readyState !== 1) return;
         const adminExists = await User.findOne({ username: 'admin' });
         if (!adminExists) {
             await User.create({
@@ -85,74 +98,84 @@ async function initDB() {
                     enabled: true, mode: 'fixed', countPerBatch: 5,
                     minCountPerBatch: 2, maxCountPerBatch: 6,
                     intervalSeconds: 60, onlyDaytime: true, lastDripTimestamp: 0
-                },
-                importQueue: []
+                }
             });
         }
     } catch (e) {
         console.error('初始化配置异常:', e);
     }
 }
-initDB();
+setTimeout(initDB, 3000);
 
 const activeUserSockets = new Map();
 
-// 核心调度引擎：完美控制时间间隔、白天限制、随机/固定条数
+// 核心滴灌调度引擎
 let dripTimer = null;
 
 async function startSchedulerEngine() {
     if (dripTimer) clearInterval(dripTimer);
 
-    // 每 3 秒扫描一次条件是否触发
     dripTimer = setInterval(async () => {
         try {
+            if (mongoose.connection.readyState !== 1) return; // 数据库未准备好时跳过，防报错
+
             let needUpdate = false;
             const config = await Config.findOne({ key: 'main' });
             if (!config) return;
 
             const now = Date.now();
+            const queueCount = await QueueItem.countDocuments({});
 
             // A. 滴灌投放引擎
-            if (config.dripConfig.enabled && config.importQueue.length > 0) {
+            if (config.dripConfig.enabled && queueCount > 0) {
                 const intervalMs = (config.dripConfig.intervalSeconds || 60) * 1000;
                 const lastTime = config.dripConfig.lastDripTimestamp || 0;
 
-                // 1. 检查是否达到了设定的时间间隔 (例如 163秒)
                 if (now - lastTime >= intervalMs) {
 
-                    // 2. 检查白天限制 (08:00 - 22:00 北京时间)
                     let canRelease = true;
                     if (config.dripConfig.onlyDaytime !== false) {
                         const currentHour = parseInt(new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }));
                         if (currentHour < 8 || currentHour >= 22) {
-                            canRelease = false; // 晚上22:00到早晨08:00暂停投放
+                            canRelease = false; 
                         }
                     }
 
                     if (canRelease) {
                         let releaseCount = config.dripConfig.countPerBatch || 5;
 
-                        // 随机模式下计算释放量
                         if (config.dripConfig.mode === 'random') {
                             const min = Number(config.dripConfig.minCountPerBatch) || 1;
                             const max = Math.max(min, Number(config.dripConfig.maxCountPerBatch) || 5);
                             releaseCount = Math.floor(Math.random() * (max - min + 1)) + min;
                         }
 
-                        const count = Math.min(releaseCount, config.importQueue.length);
-                        const batch = config.importQueue.splice(0, count);
-                        const nowStr = getChinaTimeString(new Date(now));
+                        const batch = await QueueItem.find({}).limit(releaseCount);
+                        if (batch.length > 0) {
+                            const nowStr = getChinaTimeString(new Date(now));
+                            const idsToRemove = batch.map(b => b._id);
 
-                        for (let lead of batch) {
-                            lead.create_time = nowStr;
-                            lead.timestamp = now;
-                            lead.originalPrice = lead.price;
-                            await Lead.create(lead);
+                            for (let item of batch) {
+                                await Lead.create({
+                                    id: item.id,
+                                    name: item.name,
+                                    gender: item.gender,
+                                    phone: item.phone,
+                                    region: item.region,
+                                    source: item.source,
+                                    price: item.price,
+                                    originalPrice: item.price,
+                                    create_time: nowStr,
+                                    timestamp: now
+                                });
+                            }
+
+                            await QueueItem.deleteMany({ _id: { $in: idsToRemove } });
+
+                            config.dripConfig.lastDripTimestamp = now;
+                            await config.save();
+                            needUpdate = true;
                         }
-
-                        config.dripConfig.lastDripTimestamp = now;
-                        await config.save();
-                        needUpdate = true;
                     }
                 }
             }
@@ -188,9 +211,9 @@ async function startSchedulerEngine() {
                 io.emit('realtime-db-update');
             }
         } catch (err) {
-            console.error('调度引擎报错:', err);
+            console.error('滴灌执行捕获到小异常 (已自动忽略防崩):', err);
         }
-    }, 3000); // 3秒精准轮询
+    }, 3000);
 }
 
 startSchedulerEngine();
@@ -198,219 +221,244 @@ startSchedulerEngine();
 io.on('connection', (socket) => {
 
     socket.on('login', async ({ username, password }, callback) => {
-        const user = await User.findOne({ username, password });
-        if (!user) return callback({ success: false, message: '账号或密码错误！' });
-        if (!user.can_access || user.status === 'banned') {
-            return callback({ success: false, message: '账号已被禁用！' });
-        }
-
-        if (activeUserSockets.has(user.id)) {
-            const oldSocketId = activeUserSockets.get(user.id);
-            if (oldSocketId !== socket.id) {
-                io.to(oldSocketId).emit('force-logout', '您的账号已在其他设备登录，已被挤下线！');
+        try {
+            const user = await User.findOne({ username, password });
+            if (!user) return callback({ success: false, message: '账号或密码错误！' });
+            if (!user.can_access || user.status === 'banned') {
+                return callback({ success: false, message: '账号已被禁用！' });
             }
-        }
-        activeUserSockets.set(user.id, socket.id);
-        socket.userId = user.id;
 
-        callback({ success: true, user });
+            if (activeUserSockets.has(user.id)) {
+                const oldSocketId = activeUserSockets.get(user.id);
+                if (oldSocketId !== socket.id) {
+                    io.to(oldSocketId).emit('force-logout', '您的账号已在其他设备登录，已被挤下线！');
+                }
+            }
+            activeUserSockets.set(user.id, socket.id);
+            socket.userId = user.id;
+
+            callback({ success: true, user });
+        } catch (e) {
+            callback({ success: false, message: '系统连接中，请刷新重试！' });
+        }
     });
 
     socket.on('fetch-all-data', async (callback) => {
-        const users = await User.find({});
-        const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 });
+        try {
+            const users = await User.find({}) || [];
+            const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }) || [];
 
-        // 重点修复：返回所有未归档线索 + 所有已被购买过的线索（保证用户买过的线索永远可见）
-        const purchasedLeadIds = purchaseLogs.map(l => String(l.lead_id));
-        const leads = await Lead.find({
-            $or: [
-                { isArchived: false },
-                { id: { $in: purchasedLeadIds } }
-            ]
-        }).sort({ timestamp: -1 });
+            const purchasedLeadIds = purchaseLogs.map(l => String(l.lead_id));
+            const leads = await Lead.find({
+                $or: [
+                    { isArchived: false },
+                    { id: { $in: purchasedLeadIds } }
+                ]
+            }).sort({ timestamp: -1 }) || [];
 
-        const archivedCount = await Lead.countDocuments({ isArchived: true });
-        const config = await Config.findOne({ key: 'main' });
+            const archivedCount = await Lead.countDocuments({ isArchived: true }) || 0;
+            const queueCount = await QueueItem.countDocuments({}) || 0;
+            const config = await Config.findOne({ key: 'main' });
 
-        const defaultDrip = {
-            enabled: true, mode: 'fixed', countPerBatch: 5,
-            minCountPerBatch: 2, maxCountPerBatch: 6,
-            intervalSeconds: 60, onlyDaytime: true, lastDripTimestamp: 0
-        };
+            const defaultDrip = {
+                enabled: true, mode: 'fixed', countPerBatch: 5,
+                minCountPerBatch: 2, maxCountPerBatch: 6,
+                intervalSeconds: 60, onlyDaytime: true, lastDripTimestamp: 0
+            };
 
-        callback({
-            users,
-            leads,
-            archivedCount,
-            purchaseLogs,
-            queueCount: config ? config.importQueue.length : 0,
-            dripConfig: config ? { ...defaultDrip, ...config.dripConfig } : defaultDrip
-        });
+            callback({
+                users,
+                leads,
+                archivedCount,
+                purchaseLogs,
+                queueCount,
+                dripConfig: config ? { ...defaultDrip, ...config.dripConfig } : defaultDrip
+            });
+        } catch (e) {
+            console.error('拉取数据异常:', e);
+        }
     });
 
     socket.on('update-drip-config', async (newConfig, callback) => {
-        const config = await Config.findOne({ key: 'main' });
-        if (config) {
-            config.dripConfig = { ...config.dripConfig, ...newConfig };
-            await config.save();
-            io.emit('realtime-db-update');
-        }
-        if (callback) callback({ success: true });
+        try {
+            const config = await Config.findOne({ key: 'main' });
+            if (config) {
+                config.dripConfig = { ...config.dripConfig, ...newConfig };
+                await config.save();
+                io.emit('realtime-db-update');
+            }
+            if (callback) callback({ success: true });
+        } catch (e) {}
     });
 
     socket.on('control-import-queue', async (action, callback) => {
-        const config = await Config.findOne({ key: 'main' });
-        if (config) {
+        try {
             if (action === 'clear') {
-                config.importQueue = [];
+                await QueueItem.deleteMany({});
             } else if (action === 'release_all') {
+                const queueItems = await QueueItem.find({});
                 const now = Date.now();
                 const nowStr = getChinaTimeString(new Date(now));
-                for (let lead of config.importQueue) {
-                    lead.create_time = nowStr;
-                    lead.timestamp = now;
-                    lead.originalPrice = lead.price;
-                    await Lead.create(lead);
+                for (let lead of queueItems) {
+                    await Lead.create({
+                        id: lead.id, name: lead.name, gender: lead.gender, phone: lead.phone,
+                        region: lead.region, source: lead.source, price: lead.price, originalPrice: lead.price,
+                        create_time: nowStr, timestamp: now
+                    });
                 }
-                config.importQueue = [];
+                await QueueItem.deleteMany({});
             }
-            await config.save();
             io.emit('realtime-db-update');
-        }
-        if (callback) callback({ success: true });
+            if (callback) callback({ success: true });
+        } catch (e) {}
     });
 
     socket.on('add-manual-lead', async (leadData, callback) => {
-        const cleanPhone = String(leadData.phone || '').trim();
-        const existInLeads = await Lead.findOne({ phone: cleanPhone });
-        const config = await Config.findOne({ key: 'main' });
-        const existInQueue = config ? config.importQueue.some(l => String(l.phone).trim() === cleanPhone) : false;
+        try {
+            const cleanPhone = String(leadData.phone || '').trim();
+            const existInLeads = await Lead.findOne({ phone: cleanPhone });
+            const existInQueue = await QueueItem.findOne({ phone: cleanPhone });
 
-        if (existInLeads || existInQueue) {
-            return callback({ success: false, message: `手机号 ${cleanPhone} 已存在！` });
+            if (existInLeads || existInQueue) {
+                return callback({ success: false, message: `手机号 ${cleanPhone} 已存在！` });
+            }
+
+            const now = Date.now();
+            await Lead.create({
+                id: 'lead_' + now + '_' + Math.floor(Math.random() * 1000),
+                name: leadData.name || '无',
+                gender: leadData.gender || '无',
+                phone: cleanPhone,
+                region: leadData.region || '无',
+                source: leadData.source || '无',
+                price: Number(leadData.price) || 20,
+                originalPrice: Number(leadData.price) || 20,
+                create_time: getChinaTimeString(new Date(now)),
+                timestamp: now
+            });
+
+            io.emit('realtime-db-update');
+            callback({ success: true });
+        } catch (e) {
+            callback({ success: false, message: '录入失败，请重试！' });
         }
-
-        const now = Date.now();
-        await Lead.create({
-            id: 'lead_' + now + '_' + Math.floor(Math.random() * 1000),
-            name: leadData.name || '无',
-            gender: leadData.gender || '无',
-            phone: cleanPhone,
-            region: leadData.region || '无',
-            source: leadData.source || '无',
-            price: Number(leadData.price) || 20,
-            originalPrice: Number(leadData.price) || 20,
-            create_time: getChinaTimeString(new Date(now)),
-            timestamp: now
-        });
-
-        io.emit('realtime-db-update');
-        callback({ success: true });
     });
 
     socket.on('add-batch-leads', async ({ insertList, mode }, callback) => {
-        let added = 0, dup = 0;
-        const config = await Config.findOne({ key: 'main' });
-        const now = Date.now();
-        const chinaTime = getChinaTimeString(new Date(now));
+        try {
+            let added = 0, dup = 0;
+            const now = Date.now();
+            const chinaTime = getChinaTimeString(new Date(now));
 
-        for (let item of insertList) {
-            const cleanPhone = String(item.phone || '').trim();
-            const existInDb = await Lead.findOne({ phone: cleanPhone });
-            const existInQueue = config ? config.importQueue.some(l => String(l.phone).trim() === cleanPhone) : false;
+            for (let item of insertList) {
+                const cleanPhone = String(item.phone || '').trim();
+                const existInDb = await Lead.findOne({ phone: cleanPhone });
+                const existInQueue = await QueueItem.findOne({ phone: cleanPhone });
 
-            if (existInDb || existInQueue) {
-                dup++;
-            } else {
-                const leadObj = {
-                    id: 'lead_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
-                    name: item.name || '无',
-                    gender: item.gender || '无',
-                    phone: cleanPhone,
-                    region: item.region || '无',
-                    source: item.source || 'WPS批量导入',
-                    price: Number(item.price) || 20,
-                    originalPrice: Number(item.price) || 20,
-                    create_time: item.create_time || chinaTime,
-                    timestamp: now
-                };
-
-                if (mode === 'drip' && config) {
-                    config.importQueue.push(leadObj);
+                if (existInDb || existInQueue) {
+                    dup++;
                 } else {
-                    await Lead.create(leadObj);
-                }
-                added++;
-            }
-        }
+                    const leadObj = {
+                        id: 'lead_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
+                        name: item.name || '无',
+                        gender: item.gender || '无',
+                        phone: cleanPhone,
+                        region: item.region || '无',
+                        source: item.source || 'WPS批量导入',
+                        price: Number(item.price) || 20,
+                        originalPrice: Number(item.price) || 20,
+                        create_time: item.create_time || chinaTime,
+                        timestamp: now
+                    };
 
-        if (config) await config.save();
-        io.emit('realtime-db-update');
-        callback({ success: true, addedCount: added, duplicateCount: dup, mode });
+                    if (mode === 'drip') {
+                        await QueueItem.create(leadObj);
+                    } else {
+                        await Lead.create(leadObj);
+                    }
+                    added++;
+                }
+            }
+
+            io.emit('realtime-db-update');
+            callback({ success: true, addedCount: added, duplicateCount: dup, mode });
+        } catch (e) {
+            callback({ success: false, message: '导入过程异常，请稍后重试！' });
+        }
     });
 
     socket.on('extract-leads', async ({ userId, targetLeads }, callback) => {
-        const user = await User.findOne({ id: userId });
-        if (!user) return callback({ success: false, message: '用户不存在' });
-        if (!user.can_extract) return callback({ success: false, message: '账号无提取权限！' });
+        try {
+            const user = await User.findOne({ id: userId });
+            if (!user) return callback({ success: false, message: '用户不存在' });
+            if (!user.can_extract) return callback({ success: false, message: '账号无提取权限！' });
 
-        const totalPrice = targetLeads.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
-        if (user.role !== 'admin' && user.balance < totalPrice) {
-            return callback({ success: false, message: `余额不足，所需 ¥${totalPrice}，余额 ¥${user.balance}` });
+            const totalPrice = targetLeads.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+            if (user.role !== 'admin' && user.balance < totalPrice) {
+                return callback({ success: false, message: `余额不足，所需 ¥${totalPrice}，余额 ¥${user.balance}` });
+            }
+
+            if (user.role !== 'admin') {
+                user.balance -= totalPrice;
+                await user.save();
+            }
+
+            const nowStr = getChinaTimeString();
+            for (let lead of targetLeads) {
+                await PurchaseLog.create({
+                    id: 'log_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                    username: user.username,
+                    lead_id: String(lead.id),
+                    lead_name: lead.name,
+                    phone: lead.phone,
+                    price: lead.price,
+                    source: lead.source,
+                    time: nowStr
+                });
+            }
+
+            io.emit('realtime-db-update');
+            callback({ success: true, newBalance: user.balance });
+        } catch (e) {
+            callback({ success: false, message: '提取失败，请重试！' });
         }
-
-        if (user.role !== 'admin') {
-            user.balance -= totalPrice;
-            await user.save();
-        }
-
-        const nowStr = getChinaTimeString();
-        for (let lead of targetLeads) {
-            await PurchaseLog.create({
-                id: 'log_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
-                username: user.username,
-                lead_id: String(lead.id),
-                lead_name: lead.name,
-                phone: lead.phone,
-                price: lead.price,
-                source: lead.source,
-                time: nowStr
-            });
-        }
-
-        io.emit('realtime-db-update');
-        callback({ success: true, newBalance: user.balance });
     });
 
     socket.on('delete-leads', async (leadIds, callback) => {
-        await Lead.deleteMany({ id: { $in: leadIds } });
-        io.emit('realtime-db-update');
-        callback({ success: true });
+        try {
+            await Lead.deleteMany({ id: { $in: leadIds } });
+            io.emit('realtime-db-update');
+            callback({ success: true });
+        } catch (e) {}
     });
 
     socket.on('create-user', async ({ username, password, balance }, callback) => {
-        const exist = await User.findOne({ username });
-        if (exist) {
-            return callback({ success: false, message: '用户名已存在！' });
-        }
-        await User.create({
-            id: 'u_' + Date.now(),
-            username,
-            password,
-            balance: Number(balance) || 0,
-            role: 'user',
-            can_access: true,
-            can_extract: true,
-            status: 'normal'
-        });
-        io.emit('realtime-db-update');
-        callback({ success: true });
+        try {
+            const exist = await User.findOne({ username });
+            if (exist) {
+                return callback({ success: false, message: '用户名已存在！' });
+            }
+            await User.create({
+                id: 'u_' + Date.now(),
+                username,
+                password,
+                balance: Number(balance) || 0,
+                role: 'user',
+                can_access: true,
+                can_extract: true,
+                status: 'normal'
+            });
+            io.emit('realtime-db-update');
+            callback({ success: true });
+        } catch (e) {}
     });
 
     socket.on('update-user-field', async ({ userId, updateData }, callback) => {
-        await User.updateOne({ id: userId }, { $set: updateData });
-        io.emit('realtime-db-update');
-        if (callback) callback({ success: true });
+        try {
+            await User.updateOne({ id: userId }, { $set: updateData });
+            io.emit('realtime-db-update');
+            if (callback) callback({ success: true });
+        } catch (e) {}
     });
 
     socket.on('disconnect', () => {
