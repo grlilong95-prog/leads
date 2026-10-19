@@ -51,18 +51,13 @@ function sanitizePhone(rawPhone) {
 // 数据库连接 (固定为 loan_leads_db)
 const MONGO_URI = 'mongodb+srv://gr:Yu19950120@cluster0.o5ppjmn.mongodb.net/loan_leads_db?retryWrites=true&w=majority';
 
-// 允许缓冲指令，防止网络波动直接报错
-mongoose.set('bufferCommands', true);
-
-mongoose.connect(MONGO_URI, { 
-    serverSelectionTimeoutMS: 15000, 
-    maxPoolSize: 10 
-})
-.then(() => {
-    console.log('✅ 成功连接云端数据库！所有数据正稳妥保护中！');
-    migrateOldData();
-})
-.catch(err => console.error('❌ 数据库连接暂时失败，系统正在自动尝试重连...', err));
+mongoose.set('bufferCommands', false);
+mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, maxPoolSize: 10 })
+    .then(() => {
+        console.log('✅ 成功连接云端数据库！');
+        migrateOldData();
+    })
+    .catch(err => console.error('❌ 数据库连接暂时失败:', err));
 
 const UserSchema = new mongoose.Schema({
     id: { type: String, index: true },
@@ -252,12 +247,17 @@ async function runAgingJob() {
         const now = Date.now();
         const H24 = 24 * 3600 * 1000;
         const H48 = 48 * 3600 * 1000;
+        const D7 = 7 * 24 * 3600 * 1000;
 
         let needEmit = false;
 
-        // 【安全修复】：移除了原本7天强行封存隐身的代码，线索永久留存在列表里！
+        const archiveRes = await Lead.updateMany(
+            { isArchived: false, timestamp: { $lt: now - D7 } },
+            { $set: { isArchived: true } }
+        );
+        if (archiveRes.modifiedCount > 0) needEmit = true;
 
-        const discount50Leads = await Lead.find({ isDiscount50: { $ne: true }, timestamp: { $lt: now - H48 } });
+        const discount50Leads = await Lead.find({ isArchived: false, isDiscount50: { $ne: true }, timestamp: { $lt: now - H48 } });
         for (let lead of discount50Leads) {
             lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.5));
             lead.isDiscount50 = true;
@@ -266,7 +266,7 @@ async function runAgingJob() {
             needEmit = true;
         }
 
-        const discount20Leads = await Lead.find({ isDiscount50: { $ne: true }, isDiscount20: { $ne: true }, timestamp: { $lt: now - H24 } });
+        const discount20Leads = await Lead.find({ isArchived: false, isDiscount50: { $ne: true }, isDiscount20: { $ne: true }, timestamp: { $lt: now - H24 } });
         for (let lead of discount20Leads) {
             lead.price = Math.max(1, Math.floor((lead.originalPrice || lead.price) * 0.8));
             lead.isDiscount20 = true;
@@ -309,20 +309,24 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 【安全修复】：即便网络抖动，也绝不向前端返还空数组覆盖前端！
     socket.on('fetch-all-data', async (callback) => {
         try {
             if (mongoose.connection.readyState !== 1) {
-                console.log('⚠️ 数据库连接中，跳过此帧数据推送，防止清空前端数据');
-                return;
+                return callback({ users: [], leads: [], archivedCount: 0, purchaseLogs: [], queueCount: 0, dripConfig: {} });
             }
 
             const users = await User.find({}).select('-password').lean() || [];
             const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }).limit(3000).lean() || [];
 
-            // 【安全修复】：获取数据库所有线索，永久不隐藏、不封存！
-            const leads = await Lead.find({}).sort({ timestamp: -1 }).lean() || [];
+            const activeLeads = await Lead.find({ isArchived: false }).sort({ timestamp: -1 }).lean() || [];
+            const purchasedLeadIds = purchaseLogs.map(l => String(l.lead_id));
             
+            let purchasedArchivedLeads = [];
+            if (purchasedLeadIds.length > 0) {
+                purchasedArchivedLeads = await Lead.find({ id: { $in: purchasedLeadIds }, isArchived: true }).lean() || [];
+            }
+
+            const leads = [...activeLeads, ...purchasedArchivedLeads];
             const archivedCount = await Lead.countDocuments({ isArchived: true }) || 0;
             const queueCount = await QueueItem.countDocuments({}) || 0;
             const config = await Config.findOne({ key: 'main' }).lean();
@@ -568,4 +572,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 系统安全启动成功！监听端口: ${PORT}`));
+server.listen(PORT, () => console.log(`系统启动成功，端口: ${PORT}`));
