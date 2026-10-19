@@ -255,7 +255,7 @@ async function runAgingJob() {
 
         let needEmit = false;
 
-        // 【安全修复】：移除了原本7天强行封存隐身的代码，线索永久留存
+        // 【安全修复】：移除了原本7天强行封存隐身的代码，线索永久留存在列表里！
 
         const discount50Leads = await Lead.find({ isDiscount50: { $ne: true }, timestamp: { $lt: now - H48 } });
         for (let lead of discount50Leads) {
@@ -320,7 +320,7 @@ io.on('connection', (socket) => {
             const users = await User.find({}).select('-password').lean() || [];
             const purchaseLogs = await PurchaseLog.find({}).sort({ _id: -1 }).limit(3000).lean() || [];
 
-            // 【安全修复】：获取数据库所有线索，永久不掉不关！
+            // 【安全修复】：获取数据库所有线索，永久不隐藏、不封存！
             const leads = await Lead.find({}).sort({ timestamp: -1 }).lean() || [];
             
             const archivedCount = await Lead.countDocuments({ isArchived: true }) || 0;
